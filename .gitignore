@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# training artifacts — never commit these
+runs/
+checkpoints/
+*.pt
+*.ckpt
+logs/
+wandb/
+
+.DS_Store
+.idea/
+.vscode/

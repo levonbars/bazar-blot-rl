@@ -1,0 +1,158 @@
+# Bazar Blot — Blot Star ruleset
+#
+# Canonical source: https://blotstar.com/bazar-blot-rules/, corrected and extended by the
+# project owner. See docs/01-rules.md; section references below point there.
+#
+# Provenance tags:
+#   [BS]      stated on the Blot Star rules page
+#   [OWNER]   from the project owner, who plays the game — overrides [BS] on conflict
+#   [DERIVED] forced by arithmetic consistency with a [BS] claim
+#   [OPEN-n]  unresolved; the value here is a documented default, not evidence
+#
+# THIS FILE IS THE CONTRACT. Its resolved contents are hashed into `rules_hash`, which is
+# stamped into every checkpoint and every result table. Changing any value here invalidates
+# cross-run comparisons — that is the point. Do not edit casually.
+
+preset: blotstar
+
+# ---------------------------------------------------------------- deal & seating -- §2
+deal:
+  cards_per_player: 8                     # [BS]
+  deal_all_before_auction: true           # [BS] all 8 dealt before bidding starts
+  dealer_rotation: clockwise              # [OWNER]
+  opener_and_leader: dealer_left          # [OWNER] opens the auction AND leads trick 1
+  redeal_rotates_dealer: false
+
+# ---------------------------------------------------------------- contracts -- §3
+contracts:
+  # Exactly two families: a named trump suit, or no-trump ("boy"). NO all-trump. [BS]
+  types: [C, D, H, S, NT]
+
+  # Card point values. [BS] for trump and NT columns; [OWNER] for the plain-suit column.
+  # Invariants, asserted at load:
+  #   trump contract: 62 (trump suit) + 3*30 (side suits) + 10 (says) == 162
+  #   no-trump:       4*38 + 10 == 162
+  points:
+    trump_suit: { J: 20, "9": 14, A: 11, "10": 10, K: 4, Q: 3, "8": 0, "7": 0 }
+    plain_suit: { A: 11, "10": 10, K: 4, Q: 3, J: 2, "9": 0, "8": 0, "7": 0 }
+    notrump:    { A: 19, "10": 10, K: 4, Q: 3, J: 2, "9": 0, "8": 0, "7": 0 }
+
+  # Trick-taking strength. [BS], read from the rules page card images.
+  order_trump: [J, "9", A, "10", K, Q, "8", "7"]
+  order_plain: [A, "10", K, Q, J, "9", "8", "7"]
+
+  last_hand_bonus: 10                     # "says" — both families [OWNER]
+  deal_card_points: 162                   # raw, both families [DERIVED]
+  full_deal_scaled: 16
+
+# ---------------------------------------------------------------- auction -- §4
+auction:
+  min_bid: 8                              # [OWNER]
+  max_bid: 80                             # [OWNER] = capot 25 + carrés 20+14+11+10; see §4.2
+  bid_increment: 1                        # [OWNER] minimum raise
+  bid_axis: scaled                        # a bid of 12 commits to 120 raw points [OWNER]
+
+  # Seniority is PURELY NUMERIC. Neither NT nor capot outranks at equal level. [OWNER]
+  nt_outranks_suit_at_equal_level: false
+  capot_outranks_at_equal_level: false    # "26 Capot" cannot answer "26" — go to 27 Capot
+
+  capot_is_a_bid_modifier: true           # [OWNER] a bid is (level, type, capot_flag)
+  capot_sticky_upward: true               # [OWNER] once bid, every higher bid must be capot
+
+  pass_is_binding: false                  # [OWNER] a passed player may bid again later
+  four_passes_redeal: true
+  three_passes_after_bid: close           # [OPEN-2c]  close | last_bidder_may_raise
+  max_auction_steps: 64                   # safety net: non-binding passes let it circle
+
+  contra_out_of_turn: false               # env simplification; see §4.3
+
+# ---------------------------------------------------------------- play -- §5
+play:
+  must_follow_suit: true                  # [OWNER]
+  must_beat_when_trump_led: true          # [OWNER]
+  must_ruff_when_opponent_winning: true   # [OWNER]
+  must_overtrump: true                    # [OWNER] under-trump allowed only if you cannot beat
+  must_ruff_when_partner_winning: false   # [OWNER] partner-winning EXEMPTION applies
+
+# ---------------------------------------------------------------- combinations -- §6
+combinations:
+  # Sequences are consecutive in NATURAL rank order 7 8 9 10 J Q K A — never trump order.
+  # Blot Star's own "Hundred" illustration is 7-8-9-10-J. [BS]
+  sequences: { tierce: 20, fifty: 50, hundred: 100 }
+  long_run_value: 100                     # [OWNER] 6/7/8-card runs are still 100
+
+  # Four-of-a-kind. Values differ by contract family — note trump 9=140 and A=110, which
+  # differ from classical Belote (150/100), and NT 9=0 with A=190. [BS]
+  carre_trump:   { J: 200, "9": 140, A: 110, "10": 100, K: 100, Q: 100, "8": 0, "7": 0 }
+  carre_notrump: { J: 100, "9": 0,   A: 190, "10": 100, K: 100, Q: 100, "8": 0, "7": 0 }
+
+  blot_reblot: 20                         # K+Q of trump [BS]
+  blot_reblot_in_notrump: false           # [OWNER] no trump suit to hold K+Q of
+  blot_reblot_exempt_from_comparison: true
+  # [OWNER] "does not clash with any others": flat unconditional +20 to its holder. It is
+  # neither suppressed by a bigger combination nor does it win the comparison for its team.
+  # The second half of that is inferred from the same phrase — see §6.4.
+
+  # Precedence ladder. [OWNER] — supersedes Blot Star's four loose rules.
+  #   1. any carré beats any sequence, BY CATEGORY not value (carré of Q (100) > Hundred (100))
+  #   2. carré vs carré: by value; 100-vs-100 (10/K/Q) -> elder hand
+  #   3. sequence vs sequence: length -> top card -> trump -> elder hand
+  #   Worked example: A-K-Q non-trump > J-10-9 trump > J-10-9 non-trump
+  carre_always_beats_sequence: true
+  sequence_precedence: [length, top_card, trump, elder_hand]
+  tie_resolution: elder_hand              # measured from the trick-1 leader
+  only_winning_team_scores: true          # losing side scores NONE of its combinations
+
+  # --- announce / question / show protocol -- §6.5 [OWNER] ---
+  # Three widening disclosure steps; the agent may stop at any of them.
+  #   class (hand 1) -> top card + trump bit, or carré rank (if questioned) -> cards (hand 2)
+  announce_classes: [tierce, fifty, hundred, "4x"]   # a CLASS, never a value or a card
+  announce_requires_holding: false        # PURE BLUFFS ARE LEGAL AND FREE
+  questioning_enabled: true
+  questioner_must_hold_combination: true
+  question_discloses:
+    sequence: [top_card, is_trump]        # NEVER the suit — see §6.5
+    carre: [rank]
+  answers_may_be_false: true              # compelled to answer, free to lie
+  lapsed_claim_passes_to_runner_up: true  # runner-up then scores ALL its team's combinations
+
+# ---------------------------------------------------------------- scoring -- §7
+scoring:
+  # Made:   M x bid + collected + bonuses
+  # Failed: M x bid + 16 + bonuses, to the DEFENDERS
+  # M is a LOOKUP TABLE, not a formula — no-trump is trump+1 at each doubling level. [BS]
+  bid_multiplier:
+    trump:   { none: 1, contra: 2, recontra: 4 }
+    notrump: { none: 2, contra: 3, recontra: 5 }
+
+  fulfilment_strict: false                # ">=" — collecting exactly the bid makes it [OWNER]
+  combinations_count_for_fulfilment: true # [OWNER] this is what makes bids above 16 possible
+  defenders_score_collected_on_success: true   # [OWNER]
+
+  # Capot SETS the winner's card portion to 252 raw (= 25 scaled). It does NOT add 90.
+  # A test using only a plain shutout cannot distinguish `= 252` from `+= 90`; use one
+  # that also has combinations. [OWNER]
+  capot_card_portion: 252
+  capot_bid_requires_shutout: true        # point target alone is not enough
+
+  failed_contract_base: 16
+  failed_contract_base_on_defender_capot: 25   # REPLACES the 16, does not stack [OWNER]
+
+  rounding: half_down                     # [OPEN-10] 85 -> 8, 86 -> 9
+  # half_down is what makes two teams' card-point shares of 162 always sum to exactly 16.
+  # Compute one side and take the complement; never round both independently. §7.4
+
+# ---------------------------------------------------------------- match -- §8
+match:
+  target: 101                             # [OWNER] 101 | 151 | 301 all legitimate
+  tiebreak_on_double_cross: higher_score  # [OWNER]
+  episode_unit: deal                      # deal | match — both first-class [OWNER]
+
+# ---------------------------------------------------------------- env staging --
+# Implementation choices, NOT rules claims. These deliberately deviate from the real game
+# and must be reported as such in the paper rather than quietly assumed.
+staging:
+  declarations_are_actions: false
+  # M1 auto-detects, auto-announces and auto-shows every combination at trick 1. This removes
+  # the entire announce/question/show sub-game (§6.5) — costless bluffing, suppression, the
+  # defensive counter-announcement. Turn on for the ablation. See docs/02 §3.1.

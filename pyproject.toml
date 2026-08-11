@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bazarblot"
+version = "0.1.0"
+description = "Deep RL environment for Bazar Blot (Armenian Bazaar Belote)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# core/ deliberately has NO runtime dependencies beyond the stdlib + pyyaml.
+# The rules engine must stay importable and testable in isolation, and fast.
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+env = [
+    "numpy>=1.26",
+    "pettingzoo>=1.24",
+    "gymnasium>=0.29",
+]
+learn = [
+    "torch>=2.2",
+    "tensorboard>=2.16",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bazarblot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers -m \"not slow\""
+markers = [
+    "slow: property/fuzz tests with large sample counts (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["bazarblot"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+
+[tool.coverage.run]
+source = ["src/bazarblot"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

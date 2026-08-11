@@ -1,0 +1,13 @@
+# conda env create -f environment.yml
+# conda activate bazarblot
+# pip install -e ".[dev,env]"
+#
+# Only Python and the pip toolchain live here — everything else is declared in pyproject.toml
+# so there is exactly one dependency source of truth. Add torch here (not via pip) if you want
+# a conda-managed CUDA/MPS build.
+name: bazarblot
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
