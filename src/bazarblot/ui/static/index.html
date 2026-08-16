@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bazar Blot</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<header id="topbar">
+  <h1>Bazar Blot <span class="subtitle">local UI &middot; M1.5</span></h1>
+  <div id="matchInfo" class="hidden">
+    <span id="matchScore"></span>
+    <span id="matchTarget"></span>
+  </div>
+</header>
+
+<section id="lobby">
+  <div class="lobby-card">
+    <h2>Watch</h2>
+    <p>Four bots play each other. Full state visible — the debug view.</p>
+    <label>Match seed (optional) <input id="watchSeed" type="number" placeholder="random" /></label>
+    <button id="startWatch">Start watching</button>
+  </div>
+  <div class="lobby-card">
+    <h2>Play</h2>
+    <p>You take one seat against three bots. You only see what your seat would see.</p>
+    <label>Your seat
+      <select id="playSeat">
+        <option value="0">Seat 0 (South)</option>
+        <option value="1">Seat 1 (West)</option>
+        <option value="2">Seat 2 (North)</option>
+        <option value="3">Seat 3 (East)</option>
+      </select>
+    </label>
+    <label>Match seed (optional) <input id="playSeed" type="number" placeholder="random" /></label>
+    <button id="startPlay">Start playing</button>
+  </div>
+  <div class="lobby-card">
+    <h2>Replay</h2>
+    <p>Paste a replay log (from "Copy replay log" after a deal finishes) and step through it.</p>
+    <textarea id="replayInput" placeholder='{"rules_hash": "...", "match_seed": 1, ...}'></textarea>
+    <button id="startReplay">Load replay</button>
+  </div>
+</section>
+
+<section id="game" class="hidden">
+ <div id="mainColumn">
+  <div id="table">
+    <div class="seat seat-2" id="seat2"><div class="seat-label">Seat 2 (North)</div><div class="hand" id="hand2"></div></div>
+    <div class="seat seat-1" id="seat1"><div class="seat-label">Seat 1 (West)</div><div class="hand" id="hand1"></div></div>
+    <div class="center">
+      <div id="contractBanner"></div>
+      <div id="trick" class="trick"></div>
+      <div id="dealBanner"></div>
+    </div>
+    <div class="seat seat-3" id="seat3"><div class="seat-label">Seat 3 (East)</div><div class="hand" id="hand3"></div></div>
+    <div class="seat seat-0" id="seat0"><div class="seat-label">Seat 0 (South)</div><div class="hand" id="hand0"></div></div>
+  </div>
+
+  <div id="controls">
+    <div id="watchControls" class="hidden">
+      <button id="stepBtn">Step</button>
+      <button id="autoplayBtn">Autoplay</button>
+    </div>
+    <div id="auctionPanel" class="hidden">
+      <button id="passBtn">Pass</button>
+      <button id="contraBtn">Contra</button>
+      <button id="recontraBtn">Recontra</button>
+      <div id="bidForm">
+        <input id="bidLevel" type="number" />
+        <select id="bidType"></select>
+        <label><input id="bidCapot" type="checkbox" /> Capot</label>
+        <button id="bidBtn">Bid</button>
+      </div>
+    </div>
+    <button id="nextDealBtn" class="hidden">Next deal</button>
+    <button id="copyReplayBtn" class="hidden">Copy replay log</button>
+    <div id="replayControls" class="hidden">
+      <button id="replayPrev">&larr; Prev</button>
+      <span id="replayPos"></span>
+      <button id="replayNext">Next &rarr;</button>
+    </div>
+  </div>
+ </div>
+
+  <div id="sidebar">
+    <div id="resultPanel"></div>
+    <h3>Bid history</h3>
+    <ul id="bidLog"></ul>
+    <h3>Events</h3>
+    <ul id="eventLog"></ul>
+  </div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

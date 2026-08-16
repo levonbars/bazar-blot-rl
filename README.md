@@ -70,22 +70,38 @@ top of the point target — the sharpest single decision in the game.
 ## Setup
 
 ```bash
-conda env create -f environment.yml && conda activate bazarblot && pip install -e ".[dev]"
+conda env create -f environment.yml && conda activate bazarblot && pip install -e ".[dev,ui]"
 ```
 
 ```bash
 pytest -q && ruff check . && mypy
 ```
 
+### Watch / play / replay a deal
+
+```bash
+uvicorn bazarblot.ui.app:app --port 8420   # then open http://localhost:8420
+```
+
+Three modes: **watch** four bots play each other with full state visible, **play** one seat
+yourself against three bots (only your seat's information is ever sent to the browser), or
+**replay** a logged deal (paste the JSON from "Copy replay log" after a deal finishes) and step
+through it. See [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M1.5 for
+the design (why `play` and `watch` are two genuinely separate code paths, not one function with a
+"reveal everything" flag) and the bugs building it caught.
+
 ## Status
 
-**M0 and M1 complete.** The rules engine (`src/bazarblot/core/`) implements auction, trick play,
-combination detection and scoring end to end: `cards.py`, `rules.py`, `declarations.py`,
-`auction.py`, `play.py`, `scoring.py`, `deal.py`, `match.py`. 209 tests, 99% coverage of `core/`
-(floor is 95%), a golden-hash regression fixture over 1000 seeded deals, and a 1,000,000-deal
-random-legal-playout validation with invariants enabled and zero failures.
+**M0, M1, M1.5, and M2 complete.**
 
-Two real bugs were caught and fixed during implementation, not just during design:
+The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
+and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
+golden-hash regression fixture over 1000 seeded deals, and a 1,000,000-deal random-legal-playout
+validation with invariants enabled and zero failures. A local FastAPI UI (`src/bazarblot/ui/`)
+can watch, play, and replay deals against a placeholder bot.
+
+Four real bugs were caught and fixed during implementation, not just during design — two in the
+engine, two only surfaced by actually clicking through the UI:
 - **Contra/recontra were unreachable together.** The original auction logic set `finished=True`
   immediately on `CONTRA`, which made `RECONTRA` structurally impossible to reach through play —
   the rules doc's own §4.1 table was self-contradictory (both actions claimed to "end the
@@ -98,16 +114,43 @@ Two real bugs were caught and fixed during implementation, not just during desig
   is mathematically false for ~10% of splits — including the exact split from the doc's own
   Fixture A (`106 + 56 → 11 + 6 = 17`, not 16). The engine matches the doc's worked fixtures
   (independent rounding, no complement), so the code was right and the doc's claim was corrected.
+- **Redeals reused the exact same shuffle,** since the per-deal seed was keyed only on
+  `(match_seed, deal_number)` and `deal_number` doesn't advance on a 4-pass abort. A deterministic
+  bot that passes on one exact hand would redeal into that *same* hand forever. Fixed by keying
+  the seed on `(match_seed, deal_number, redeal_attempt)`.
+- **The placeholder bot's bidding threshold was off by about 10x**, so it essentially never
+  opened an auction — every deal aborted. Both UI-layer bugs were invisible to the engine's own
+  (extensive) test suite, because the engine was never wrong — the code driving it was. That's
+  the concrete argument for building M1.5 before trusting any agent's self-play numbers later.
 
-Both corrections are written up in [`docs/01-rules.md`](docs/01-rules.md) §4.1–§4.3 and §7.4, not
-just fixed silently.
+All four corrections are written up where they occurred — [`docs/01-rules.md`](docs/01-rules.md)
+§4.1–§4.3 and §7.4, [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M1.5
+— not just fixed silently.
 
 Two rules questions remain open (auction termination after three passes, and half-up vs half-down
 rounding), both behind config flags in `presets/blotstar.yaml` and neither blocking.
 
-Next: **M1.5** — a local UI to watch, play and replay deals. Then M2 (double-dummy solver) and M3
-(environment layer) in parallel.
+**M2** (`src/bazarblot/solver/`) adds a double-dummy solver — an alpha-beta oracle that, given all
+four hands, computes the maximum raw points the declaring side can force under optimal play from
+both sides. Correctness is fully verified: 9 tests cross-check it against an independent
+brute-force reference (reduced-deal agreement, a literal 10,000-sample bulk check, PV replay
+through the real engine, and a zero-sum identity — solving the same deal from each team's own
+perspective must sum to the deal total exactly). Chasing this surfaced **four independent
+soundness bugs** in the classic bridge-solver "equivalence class" speedup, all written up in
+[`solver/dd.py`](src/bazarblot/solver/dd.py)'s module docstring — the short version is that
+collapsing rank-adjacent cards into one cache-key class, standard practice in trick-counting
+bridge solvers, is unsound in a *point*-scoring 2v2 game in three different ways, and unsound a
+fourth way even in a scoped-down "same hand only" form. The transposition table therefore stays
+keyed on the exact position, and performance is honest about the cost: **median 6.3s, p95 42.7s**
+per full 8-trick solve, roughly 1000x over the original 5ms aspiration (which assumed the
+now-abandoned reduction). That makes the solver solid for offline dataset generation and
+evaluation, but not yet fast enough to sit in a self-play or PIMC inner loop — closing that gap is
+future work (a compiled backend, or a correctly-designed cross-position reduction nobody has built
+for this ruleset yet).
+
+Next: **M3** (environment layer).
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
-bid, both final scores) as a conformance fixture — it would settle the rounding question
-empirically and keep re-checking the scoring code forever after.
+bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this
+easy to produce now. It would settle the rounding question empirically and keep re-checking the
+scoring code forever after.

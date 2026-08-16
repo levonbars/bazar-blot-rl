@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bazarblot-ui",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "source /Users/barse/anaconda3/etc/profile.d/conda.sh && conda activate bazarblot && uvicorn bazarblot.ui.app:app --host 127.0.0.1 --port 8420 --reload --reload-dir src"],
+      "port": 8420
+    }
+  ]
+}
