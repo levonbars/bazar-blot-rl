@@ -281,6 +281,79 @@ finishing M3. Flagged here rather than silently dropped.
 
 ---
 
+## M2.5 — DD solver speed, the cheap way (1–3 days, all Python)
+
+**Scope decision first: the DD solver is not on the critical path.** A dependency check after M4
+confirmed the only runtime consumer of `solver/dd.py` anywhere in `src/` is `agents/pimc.py`.
+Nothing in `env/` — the training-facing surface — touches it, so **M7's self-play training and
+M8's two-phase experiments, the actual paper, have zero dependency on solver speed.** Its uses
+split cleanly by how much speed they need:
+
+| Use | Speed needed | Status today |
+|---|---|---|
+| Correctness cross-check of `core/play`/`scoring` | none | done (M2) |
+| Self-play training (M7), two-phase experiments (M8) | none — no dependency | not blocked |
+| Paired/duplicate eval, winrates, Elo (M5) | none | not blocked |
+| DD-oracle metrics: bid-accuracy-vs-oracle, points-lost-vs-DD-optimal (M5) | offline batch | feasible now with a process pool: ~1k deals ≈ 20 min on 8 cores, 10k ≈ 3–4 h — paper-table scale |
+| PIMC baseline (M4) | inner loop, `K × legal_cards` solves per decision | blocked at full-deal scale; fine as an endgame hybrid |
+| DD-value auxiliary head labels (§7.2, optional) at 10⁵–10⁶ | offline but huge | blocked at that scale without the label-harvest item below |
+
+So the original "<5 ms per full deal" target is retired as a **goal**, not just missed: it was
+aspirational polish that assumed a cross-position equivalence reduction this ruleset does not
+admit (four independent soundness failures, M2 status). The replacement target is the one that
+actually gates anything: **make the offline uses batch-feasible and the PIMC baseline usable,
+without a compiled backend.** Everything below is pure Python, touches no correctness logic that
+isn't already covered by the brute-force cross-check, and each item is independently valuable —
+stop whenever the M5 numbers you actually want are affordable.
+
+**Work items, in order of value per hour:**
+
+1. **Batch/parallel solve wrapper** — `solver/batch.py`: `solve_many(specs, workers=N)` over a
+   process pool. Zero changes to `dd.py`. Makes every offline oracle metric and label-generation
+   job feasible immediately (linear in cores). Hours.
+2. **PIMC endgame hybrid** — a `solve_threshold` parameter on `agents/pimc.py`: heuristic play
+   while more than `N` cards remain per hand, true DD-PIMC once `≤ N` (solves are near-instant
+   at 3–4 cards, measured). This is already how `tests/test_agents_pimc.py` exercises it;
+   formalizing it turns PIMC from "correct but unusable" into a real baseline. "Endgame solver +
+   heuristic opening" is a standard, legitimate bot design, not a cop-out — say so in the paper.
+   Hours.
+3. **Transposition-table reuse across PIMC's candidate cards** — PIMC evaluates every legal card
+   from the *same* sampled world and currently throws the TT away between them, though the
+   candidate subtrees overlap heavily. Expose a reusable solver object from `dd.py` (a
+   `Solver.value_after(card)` on a shared TT) and use it in `pimc._play`. Plausibly 2–5× on PIMC
+   specifically. Half a day.
+4. **Bitmask hands inside the solver** — `int` bitmasks instead of `frozenset[int]` for hands
+   (O(1) hashing/removal, precomputed suit masks for the solver's own legal-move generation).
+   Pure representation change; the brute-force cross-check — which still goes through
+   `core.play.legal_moves` — is exactly what validates that the specialized generator didn't
+   drift from the rules. Several-× constant factor. About a day.
+5. **Label harvest for the DD-value head** — one root solve leaves thousands of `_EXACT` entries
+   in its TT, each a solved sub-position. Emit them as `(position, value)` labels instead of
+   solving each position separately. Turns the optional §7.2 auxiliary head from "10⁶ solves,
+   infeasible" into "a few thousand root solves, overnight". Note the labels are biased toward the
+   searched subtree — fine for an auxiliary head, worth one sentence in the paper. Half a day.
+6. **Re-measure and re-pin** — re-run `test_median_solve_time_is_a_measured_regression_guard`
+   after each of 3/4 and tighten its guard rail to the new number; record before/after in this
+   section.
+
+**Explicitly deferred (do not start these without a new reason):**
+- **Rust/PyO3 or Cython port** — 1–2 weeks for a component off the critical path. Only worth it
+  if M9 (search augmentation) is actually pursued and needs DD inside a search loop.
+- **Another cross-position equivalence-reduction attempt** — four independent failures in; this
+  is a research problem about the key representation, not an engineering task. Needs a new idea
+  for a key that survives point-scoring, multiplicity, cross-hand identity, *and*
+  third-party-in-another-hand simultaneously — none is on the table.
+- **Third-party engine cross-validation** — still lower value than the brute-force reference;
+  unchanged from M2.
+
+**Done when:** (a) `solve_many` produces oracle metrics for 1k full deals in under 30 min on the
+dev machine; (b) PIMC with `solve_threshold=4` completes a full deal in seconds and passes
+`test_pimc_declarer_matches_or_beats_heuristic_declarer_against_identical_defense` at that
+threshold; (c) the median full-deal solve time is re-measured, recorded here, and the regression
+guard tightened to it.
+
+---
+
 ## M3 — Environment layer (2–3 days)
 
 `env/actions.py`, `env/obs.py` (`OBS_VERSION="v1"`), `env/aec.py`, `env/single.py`.
