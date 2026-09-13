@@ -18,7 +18,12 @@ dependencies = [
 
 [project.optional-dependencies]
 env = [
-    "numpy>=1.26",
+    # Capped below 2.1: numpy's bundled type stubs start using PEP 695 `type` alias syntax
+    # around there, which mypy can only parse under `python_version >= "3.12"` — a hard
+    # SyntaxError under this project's `python_version = "3.11"` mypy target (§ requires-python
+    # says >=3.11, and mypy is meant to actually verify that floor, not just the interpreter
+    # that happens to run it). Revisit the cap once the project's minimum Python moves to 3.12.
+    "numpy>=1.26,<2.1",
     "pettingzoo>=1.24",
     "gymnasium>=0.29",
 ]
@@ -71,6 +76,18 @@ warn_unreachable = true
 module = "bazarblot.ui.*"
 disallow_untyped_defs = false
 warn_unused_ignores = false
+
+# Neither ships a py.typed marker / stub package.
+[[tool.mypy.overrides]]
+module = ["pettingzoo.*", "pettingzoo"]
+ignore_missing_imports = true
+
+# `AECEnv` resolves to `Any` because pettingzoo ships no stubs (see the override above); strict
+# mode's `disallow_subclassing_any` would otherwise reject `class BazarBlotAEC(AECEnv)` itself,
+# which is unavoidable — it's the actual PettingZoo API this module implements.
+[[tool.mypy.overrides]]
+module = "bazarblot.env.aec"
+disallow_subclassing_any = false
 
 [tool.coverage.run]
 source = ["src/bazarblot"]

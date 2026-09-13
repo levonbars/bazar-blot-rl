@@ -300,6 +300,57 @@ permuting unseen cards among the other three seats subject to known voids. Run 1
 documented; augmentation verified to preserve the game value (a suit permutation applied to a
 solved deal gives the same DD result).
 
+### M3 status: **complete**
+
+Built as `src/bazarblot/env/`: `tracked_deal.py` (the one piece of history `Deal` itself doesn't
+keep — the full auction action log, needed for the `bid_summary`/`bid_recent` observation
+blocks), `infoset.py` (`InfoSet` + `info_set()`, the security boundary — a separate, independent
+implementation from `ui/views.py`'s `player_view()`, verified by its own test suite rather than
+one shared implementation both sides trust blindly), `actions.py`, `obs.py`, `augment.py`,
+`aec.py`, and `single.py`.
+
+**The leakage test passes at the full 10^5 samples** (`tests/test_env_infoset.py`), plus a
+second, smaller-scale extension into the PLAY phase (where meld disclosure under auto-show is a
+genuine, correctly-public difference between two otherwise-identical worlds, and is explicitly
+excluded from that specific comparison — see the test file's docstring for why that's not a
+carve-out for a real leak, just a scope boundary around a different, separately-covered
+property). `pettingzoo.test.api_test` passes for both `episode_unit="deal"` and `"match"`.
+Suit-permutation augmentation is verified to preserve the DD-solved value exactly, in both trump
+and `NT` contracts. Full project suite passes; `env/` sits at 91–100% coverage per file
+(100% on `actions.py`/`tracked_deal.py`); `mypy --strict` and `ruff` are clean.
+
+**Four places where this module deliberately departs from the spec's literal wording, each
+documented at its own site rather than silently resolved:**
+
+1. **`ACTION_DIM` is 765, not the spec's worked 796.** The extra 31 slots are the
+   announce/question/answer/show combination protocol (spec §3.1), which needs a staged
+   announce/question/show state machine `core/` doesn't have — the shipped preset has
+   `staging.declarations_are_actions = False` anyway (melds are auto-shown, not staged), and
+   `build_action_space` raises `NotImplementedError` if that flag is ever turned on rather than
+   exposing 31 action slots nothing could legally use.
+2. **`melds_public` is `(4, 28)`, not the spec's stated `(4, 25)`.** The spec's own itemized
+   per-seat channel list (class one-hot(5) + top-card one-hot(9) + trump bit(2) + carre-rank
+   one-hot(7) + 5 single-value flags) sums to 28; the "25"/"100" summary figures elsewhere in the
+   same section don't match that list. The itemization is unambiguous and directly checkable, so
+   it's what's implemented.
+3. **The observation dict key is `"observation"`, not the spec's `"obs"`.** PettingZoo's own
+   convention (`pettingzoo.classic.tictactoe` and every other bundled action-masked env) — and
+   critically, `pettingzoo.test.api_test`'s own dict-unwrapping logic — specifically look for a
+   key named `"observation"`. Matching the spec's literal wording instead would silently skip
+   real test coverage rather than just being a cosmetic mismatch.
+4. **`bid_recent` is always computed, not "(auction phase only)" as the spec's block table
+   says.** `info.auction_log` never gets cleared once play starts, so during `PLAY` this block
+   naturally shows the tail of the auction that produced the contract — and, more importantly, a
+   phase-dependent flat observation shape is incompatible with Gym/PettingZoo's fixed-shape
+   `observation_space`, which every agent framework downstream assumes.
+
+**A real test-suite process bug was caught and fixed here**, unrelated to M3's own
+correctness but affecting how it was verified: several full-8-trick-deal DD-solve tests in
+`tests/test_solver_dd.py` (added during M2) were left unmarked in the fast tier, each taking
+minutes rather than seconds. Re-tiered to `@pytest.mark.slow` with cheap reduced-deal companions
+added so the same properties still run on every build — the fast tier (300 tests) now completes
+in well under a minute instead of hanging for an hour.
+
 ---
 
 ## M4 — Baselines (2–3 days)

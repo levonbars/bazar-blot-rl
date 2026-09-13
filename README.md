@@ -92,7 +92,7 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0, M1, M1.5, and M2 complete.**
+**M0, M1, M1.5, M2, and M3 complete.**
 
 The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
 and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
@@ -148,7 +148,26 @@ evaluation, but not yet fast enough to sit in a self-play or PIMC inner loop —
 future work (a compiled backend, or a correctly-designed cross-position reduction nobody has built
 for this ruleset yet).
 
-Next: **M3** (environment layer).
+**M3** (`src/bazarblot/env/`) adds the RL-facing environment layer: an `InfoSet` security
+boundary derived independently from the UI's own (`ui/views.py` and `env/infoset.py` are two
+separate implementations of "what can seat X see," each with its own test suite), a flat
+phase-masked action space, a `v1` tensor observation encoder, suit-permutation data augmentation,
+and both a PettingZoo AEC multi-agent env and a Gym single-agent wrapper. The load-bearing check —
+the leakage test — passes at the full 10^5 samples the roadmap calls for, `pettingzoo.test.api_test`
+passes in both single-deal and full-match episode modes, and suit augmentation is verified to
+leave the DD-solved value of a deal exactly unchanged. Four places where this module knowingly
+departs from the design spec's literal wording (a smaller action-space dimension, a different
+`melds_public` block size, the `"observation"` vs `"obs"` key name, and always computing
+`bid_recent` rather than gating it to the auction phase) are each documented at their own site in
+[`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M3 rather than silently
+resolved.
+
+Building this also caught a real test-suite pacing bug: several full-8-trick DD-solve tests from
+M2 were sitting unmarked in the fast tier, each taking minutes rather than seconds. They're now
+correctly tiered as `slow`, with cheap reduced-deal companions covering the same properties — the
+fast tier (300 tests) runs in well under a minute.
+
+Next: **M4** (baseline agents — random, heuristic, PIMC).
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

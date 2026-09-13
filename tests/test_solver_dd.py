@@ -62,10 +62,13 @@ def test_agrees_with_brute_force_on_reduced_deals(cards_per_player: int) -> None
         )
 
 
+@pytest.mark.slow
 def test_agrees_with_brute_force_at_reduced_scale_10000_samples() -> None:
     """The roadmap's literal "10^4 random reduced deals" figure, at a single representative
     reduced size (3 tricks — large enough to exercise real search, small enough that brute
-    force stays fast across 10,000 samples)."""
+    force stays fast across 10,000 samples). Even at this reduced size, 10,000 samples takes
+    minutes, not seconds — well past what belongs in the fast tier (see
+    `test_agrees_with_brute_force_on_reduced_deals` for that: same property, 160 samples)."""
     n = 10_000
     cards_per_player = 3
     for seed in range(n):
@@ -83,50 +86,76 @@ def test_agrees_with_brute_force_at_reduced_scale_10000_samples() -> None:
 # ---------------------------------------------------------------- PV validity
 
 
+def _assert_pv_is_a_legal_value_achieving_playout(
+    hands: Hands, contract_type: str, leader: int, declaring_team: int, seed: int
+) -> None:
+    tables = build_tables(contract_type, RULES)
+    result = solve(hands, contract_type, leader, declaring_team, RULES)
+    n_cards = sum(len(h) for h in hands)
+    assert len(result.principal_variation) == n_cards
+
+    live_hands = [set(h) for h in hands]
+    to_act = leader
+    trick: list[tuple[int, int]] = []
+    declarer_points = 0
+    for card in result.principal_variation:
+        legal = legal_moves(
+            frozenset(live_hands[to_act]), tuple(trick), to_act, contract_type, RULES, tables
+        )
+        assert card in legal, f"seed={seed}: PV plays an illegal card"
+        live_hands[to_act].discard(card)
+        trick.append((to_act, card))
+        if len(trick) == 4:
+            winner = current_winner(tuple(trick), tables)
+            pts = sum(tables.points[c] for _, c in trick)
+            if not any(live_hands):
+                pts += RULES.contracts.last_hand_bonus
+            if TEAM_OF[winner] == declaring_team:
+                declarer_points += pts
+            to_act = winner
+            trick = []
+        else:
+            to_act = (to_act + 1) % 4
+
+    assert declarer_points == result.declarer_points
+
+
+def test_principal_variation_is_a_legal_full_playout_fast() -> None:
+    """Same property as the slow-tier version below, at reduced scale (4 cards/player, cheap to
+    solve) so it still runs every build."""
+    for seed in range(30):
+        rng = random.Random(seed + 4_000_000)
+        hands = _reduced_hands(rng, 4)
+        contract_type = rng.choice(CONTRACT_TYPES)
+        leader = rng.randrange(4)
+        declaring_team = rng.randrange(2)
+        _assert_pv_is_a_legal_value_achieving_playout(
+            hands, contract_type, leader, declaring_team, seed
+        )
+
+
+@pytest.mark.slow
 def test_principal_variation_is_a_legal_full_playout() -> None:
     """Replay the PV through the actual engine's own legality/resolution and confirm the
     points it produces match `declarer_points` exactly — the PV isn't just A valid line, it's
-    the one that actually achieves the claimed value."""
+    the one that actually achieves the claimed value. Full 8-trick deals, so each sample is a
+    multi-second DD solve (see `solver/dd.py`'s documented performance) — slow tier only."""
     for seed in range(60):
         rng = random.Random(seed)
         hands = _full_hands(rng)
         contract_type = rng.choice(CONTRACT_TYPES)
         leader = rng.randrange(4)
         declaring_team = rng.randrange(2)
-        tables = build_tables(contract_type, RULES)
-
-        result = solve(hands, contract_type, leader, declaring_team, RULES)
-        assert len(result.principal_variation) == 32
-
-        live_hands = [set(h) for h in hands]
-        to_act = leader
-        trick: list[tuple[int, int]] = []
-        declarer_points = 0
-        for card in result.principal_variation:
-            legal = legal_moves(
-                frozenset(live_hands[to_act]), tuple(trick), to_act, contract_type, RULES, tables
-            )
-            assert card in legal, f"seed={seed}: PV plays an illegal card"
-            live_hands[to_act].discard(card)
-            trick.append((to_act, card))
-            if len(trick) == 4:
-                winner = current_winner(tuple(trick), tables)
-                pts = sum(tables.points[c] for _, c in trick)
-                if not any(live_hands):
-                    pts += RULES.contracts.last_hand_bonus
-                if TEAM_OF[winner] == declaring_team:
-                    declarer_points += pts
-                to_act = winner
-                trick = []
-            else:
-                to_act = (to_act + 1) % 4
-
-        assert declarer_points == result.declarer_points
+        _assert_pv_is_a_legal_value_achieving_playout(
+            hands, contract_type, leader, declaring_team, seed
+        )
 
 
 def test_declarer_took_all_tricks_flag_is_consistent_with_the_pv() -> None:
+    """Exercises `_pv_all_tricks_to_declarer` — doesn't need a full 8-trick deal to do so, and a
+    reduced (4 cards/player) one keeps this in the fast tier."""
     rng = random.Random(123)
-    hands = _full_hands(rng)
+    hands = _reduced_hands(rng, 4)
     tables = build_tables("H", RULES)
     result = solve(hands, "H", leader=0, declaring_team=0, rules=RULES)
 
@@ -149,6 +178,28 @@ def test_declarer_took_all_tricks_flag_is_consistent_with_the_pv() -> None:
 # ---------------------------------------------------------------- deal totals & sanity bounds
 
 
+def test_solving_from_either_teams_perspective_is_the_same_game_fast() -> None:
+    """Same identity as the slow-tier version below, at reduced scale (4 cards/player). The
+    total isn't the full deal's fixed 162 here — only 16 of the 32 cards are in play — so it's
+    computed from the actual dealt cards' point values (plus the last-hand bonus, which still
+    fires at a reduced deal's own final trick) rather than hardcoded."""
+    for seed in range(60):
+        rng = random.Random(seed + 5_000_000)
+        hands = _reduced_hands(rng, 4)
+        contract_type = rng.choice(CONTRACT_TYPES)
+        leader = rng.randrange(4)
+        tables = build_tables(contract_type, RULES)
+        total = sum(tables.points[c] for h in hands for c in h) + RULES.contracts.last_hand_bonus
+
+        as_team0 = solve(hands, contract_type, leader, declaring_team=0, rules=RULES)
+        as_team1 = solve(hands, contract_type, leader, declaring_team=1, rules=RULES)
+        assert as_team0.declarer_points + as_team1.declarer_points == total, (
+            f"seed={seed} contract={contract_type} leader={leader}: "
+            f"{as_team0.declarer_points} + {as_team1.declarer_points} != {total}"
+        )
+
+
+@pytest.mark.slow
 def test_solving_from_either_teams_perspective_is_the_same_game() -> None:
     """`solve(..., declaring_team=T)` has team T maximize its own points while the other team
     minimizes team T's points. Because raw points partition exactly (whatever team T doesn't
@@ -158,7 +209,10 @@ def test_solving_from_either_teams_perspective_is_the_same_game() -> None:
     same hands/contract/leader are the same optimal-play game viewed from each side, and their
     results must sum to the deal total EXACTLY, not approximately. This is a hard mathematical
     identity, not a heuristic — if `_Solver` treats the two calls asymmetrically in any way
-    (an alpha-beta sign error, a mishandled window shift), this is very likely to catch it."""
+    (an alpha-beta sign error, a mishandled window shift), this is very likely to catch it.
+    Full 8-trick deals — 120 full solves total, minutes not seconds — slow tier only; see
+    `test_solving_from_either_teams_perspective_is_the_same_game_fast` for the fast-tier check
+    of the same identity."""
     for seed in range(60):
         rng = random.Random(seed)
         hands = _full_hands(rng)
