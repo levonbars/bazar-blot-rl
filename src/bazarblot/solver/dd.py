@@ -300,12 +300,35 @@ def solve(
     declaring_team: int,
     rules: RuleConfig,
 ) -> DDResult:
-    """Solve one deal's play phase to completion. See `DDResult` for exactly what
-    `declarer_points` does and does not include."""
+    """Solve one deal's play phase to completion, from the start of a fresh trick led by
+    `leader`. See `DDResult` for exactly what `declarer_points` does and does not include.
+    `solve_from` is the general form this delegates to (`trick_so_far=()`)."""
+    return solve_from(hands, contract_type, leader, (), declaring_team, rules)
+
+
+def solve_from(
+    hands: Hands,
+    contract_type: ContractType,
+    to_act: int,
+    trick_so_far: Trick,
+    declaring_team: int,
+    rules: RuleConfig,
+) -> DDResult:
+    """Like `solve`, but starting from an arbitrary point mid-deal rather than only a fresh
+    trick: `trick_so_far` (possibly empty) is what the seats before `to_act`, in this trick's
+    play order, have already played into the CURRENT trick, and `hands` holds only the cards
+    still unplayed by anyone (nothing in `trick_so_far` may also appear in `hands`).
+
+    Needed by anything that must evaluate "what happens if I play this specific card right now"
+    for a seat that is not leading — `_Solver.search` already supports this internally (it's
+    exactly what the recursive case does at every non-trick-ending ply), this just exposes it as
+    a public entry point. `agents/pimc.py` is the first caller: PIMC has to compare candidate
+    cards from whatever position the human/agent seat actually faces, most of which are mid-trick.
+    """
     tables = build_tables(contract_type, rules)
     solver = _Solver(tables, contract_type, declaring_team, rules)
-    value, pv = solver.search(hands, leader, (), 0, _BIG)
-    all_tricks = _pv_all_tricks_to_declarer(pv, leader, tables, declaring_team)
+    value, pv = solver.search(hands, to_act, trick_so_far, 0, _BIG)
+    all_tricks = _pv_all_tricks_to_declarer(pv, to_act, trick_so_far, tables, declaring_team)
     return DDResult(
         declarer_points=value,
         declarer_took_all_tricks=all_tricks,
@@ -315,23 +338,28 @@ def solve(
 
 
 def _pv_all_tricks_to_declarer(
-    pv: tuple[int, ...], leader: int, tables: ContractTables, declaring_team: int
+    pv: tuple[int, ...],
+    to_act: int,
+    initial_trick: Trick,
+    tables: ContractTables,
+    declaring_team: int,
 ) -> bool:
-    """Whether every one of the 8 tricks along `pv` was won by the declaring team. Purely a
-    replay/reporting convenience — has no bearing on `declarer_points`, which already reflects
-    optimal play regardless of who wins which trick."""
-    to_act = leader
-    trick: list[tuple[int, int]] = []
+    """Whether every trick completed along `pv` (starting from `initial_trick`, possibly
+    non-empty for `solve_from`) was won by the declaring team. Purely a replay/reporting
+    convenience — has no bearing on `declarer_points`, which already reflects optimal play
+    regardless of who wins which trick."""
+    trick: list[tuple[int, int]] = list(initial_trick)
+    seat = to_act
     for card in pv:
-        trick.append((to_act, card))
+        trick.append((seat, card))
         if len(trick) == 4:
             winner = current_winner(tuple(trick), tables)
             if TEAM_OF[winner] != declaring_team:
                 return False
-            to_act = winner
+            seat = winner
             trick = []
         else:
-            to_act = (to_act + 1) % 4
+            seat = (seat + 1) % 4
     return True
 
 

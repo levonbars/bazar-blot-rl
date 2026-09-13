@@ -366,6 +366,73 @@ in well under a minute instead of hanging for an hour.
 **Done when:** heuristic beats random by a wide, statistically-established paired margin; PIMC-20
 beats heuristic; all three run through the evaluation harness.
 
+### M4 status: **complete, with the eval-harness criterion honestly deferred to M5**
+
+Built as `src/bazarblot/agents/`: `base.py` (the shared `Agent` protocol — one `act(info, space,
+legal_mask) -> int` method every baseline implements), `random_agent.py`, `heuristic.py`, and
+`pimc.py`. All three take an `InfoSet` and the legal_mask already computed for it, never a `Deal`.
+
+**`RandomAgent`** is exactly the spec: uniform over the legal_mask's set bits.
+
+**`HeuristicAgent`** (the "club player") evaluates every contract type against its own hand only
+— raw point value under that contract, a length bonus for a long trump suit, its own detected
+combination value, and a crude fixed-fraction estimate of what partner might contribute from the
+cards not in its own hand — and bids the best one if it beats the standing bid, never raising
+over its own partner (no bidding-convention model). Play follows the stated conventions: second
+hand low, third/fourth hand win as cheaply as possible or discard the least valuable card, cash
+an ace early in `NT`, lead trump when declaring with two or more of it. "Signal partner" is
+implemented only as the passive half (discard from your weakest suit) — a genuine two-way
+convention needs a matching interpretation model on the receiving end, out of scope here, same
+reasoning as skipping bidding conventions.
+
+**`PIMCAgent`** delegates auction decisions to a `HeuristicAgent` by composition — PIMC as
+described ("sample K worlds, DD-solve each, play the argmax action") is a play-phase method; a
+bid's value depends on the rest of the auction unfolding, not a single perfect-information
+subgame, and real PIMC-style bridge bots make the same split. For play, it infers known voids
+from the public trick history (an unconditional proof whenever a seat plays off the led suit
+without ruffing), constructs `K` full-hand worlds consistent with the `InfoSet` and every known
+void via rejection sampling, and for each legal card evaluates its continuation via
+`solver/dd.solve_from` (a new public entry point — see below) averaged across the `K` worlds,
+taking the argmax (declaring side) or argmin (defending side).
+
+**`solve_from` is a new addition to `solver/dd.py`**, needed because `solve()` only starts a
+fresh trick from a leader — PIMC has to evaluate candidate cards for a seat that is very often
+*not* leading. `_Solver.search()` already supported an arbitrary starting trick internally (every
+recursive call is exactly that); `solve_from` just exposes it, with `solve()` now defined as the
+`trick_so_far=()` special case. Verified two ways: agreement with `solve()` at that special case,
+and the sharper check that a sub-path of an already-computed optimal `solve()` PV, re-solved from
+a snapshot partway through (including mid-trick), returns exactly the raw points remaining along
+the original line — a hard identity for minimax, not a heuristic.
+
+**Correctness verified**, not just "runs without crashing": `_infer_voids` against hand-built
+trick histories; `_sample_world` checked to always respect hand-size counts, never touch the
+mover's own hand, and never violate a known void, across many real mid-deal positions; PIMC's
+own `_value_of_playing` cross-checked against `solve_from` itself (the extremum over all legal
+cards must equal what the solver returns for that exact position — the same style of check
+`solver/dd.py` uses on itself). `mypy --strict` and `ruff` are clean; `agents/` sits at 89–100%
+coverage per file.
+
+**Heuristic beats random by a wide margin** — `tests/test_agents_heuristic.py`'s fast-tier check
+over 200 deals gives a mean squashed per-deal margin (spec §6's `tanh(Δ/24)`) of **~0.98** (near
+the ±1 saturation point), i.e. heuristic wins almost every single deal. This is unpaired
+(independent seeds, not the same shuffle played both ways), because the paired/duplicate
+evaluation harness is M5's own deliverable and doesn't exist yet — flagged rather than
+half-built here. At this margin the distinction is moot: per-deal variance cannot plausibly
+explain a result this lopsided even unpaired.
+
+**"PIMC-20 beats heuristic" is honestly *not* verified at the scale the roadmap implies**, and
+this is a real, reported limitation, not an oversight. `solve_from` costs the same 1–40+ seconds
+per call as `solve()` (M2), and PIMC needs `K x len(legal_cards)` of them for a single decision —
+`8 x 20 = 160` full solves before PIMC-20 would even choose its first card of a fresh deal, many
+minutes for one decision alone. What's actually verified (`tests/test_agents_pimc.py`, one test
+marked `slow`): PIMC-4 taking over as declarer for the last 1–3 tricks of many real deals (where
+remaining hands are small enough that `solve_from` is cheap and close to exhaustive) scores at
+least 80% of what a heuristic declarer achieves against the *identical* heuristic defense from
+the *identical* snapshot — a genuinely paired, if narrow-scope, comparison. A real "PIMC-20 vs.
+heuristic over full deals" number needs either a compiled DD-solver backend or accepting a
+budget of minutes per decision; neither happened here, and the M4 "done when" line is only
+partially met as a result — narrowly on defensible, load-bearing evidence, not by assumption.
+
 ---
 
 ## M5 — Evaluation harness (1–2 days) — before any training

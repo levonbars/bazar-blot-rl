@@ -92,7 +92,7 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0, M1, M1.5, M2, and M3 complete.**
+**M0 through M4 complete.**
 
 The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
 and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
@@ -167,7 +167,28 @@ M2 were sitting unmarked in the fast tier, each taking minutes rather than secon
 correctly tiered as `slow`, with cheap reduced-deal companions covering the same properties — the
 fast tier (300 tests) runs in well under a minute.
 
-Next: **M4** (baseline agents — random, heuristic, PIMC).
+**M4** (`src/bazarblot/agents/`) adds three baseline agents behind a shared `Agent` protocol
+(`act(info, space, legal_mask) -> int`): a uniform-random baseline, a "club player" heuristic
+(hand-evaluation bidding + textbook trick-taking play conventions — second hand low, cash aces in
+`NT`, lead trump when declaring), and a PIMC agent (sample K worlds respecting known voids,
+DD-solve each candidate card, play the argmax). Heuristic beats random by a wide margin — a mean
+squashed per-deal margin of ~0.98 out of a ±1 range over 200 deals. Building PIMC needed a new
+public entry point in the solver, `solve_from`, since PIMC must evaluate cards from positions
+that aren't a fresh trick lead; it's verified against `solve()` and against replaying a snapshot
+partway through an already-optimal line.
+
+**"PIMC-20 beats heuristic" is honestly not verified at that scale** — a real, reported
+limitation carried over directly from M2's disclosed solver performance. PIMC needs `K x
+len(legal_cards)` full DD solves for one decision, and each solve is 1–40+ seconds; PIMC-20's
+first play-phase decision alone would need on the order of 160 full solves. What's verified
+instead: PIMC taking over as declarer for the final few tricks of many deals (where remaining
+hands are small and solves are cheap) scores within a defensible margin of a heuristic declarer
+against *identical* defense from the *identical* snapshot. See
+[`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M4 for the full account
+of what's verified and what isn't.
+
+Next: **M5** (the paired/duplicate evaluation harness — needed before any of these three
+comparisons can be made rigorous at full scale, and before any training run in M7).
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

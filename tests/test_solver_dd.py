@@ -17,7 +17,7 @@ import pytest
 from bazarblot.core.cards import TEAM_OF, build_tables, full_deck
 from bazarblot.core.play import current_winner, legal_moves
 from bazarblot.core.rules import load_default
-from bazarblot.solver.dd import Hands, brute_force_solve, solve
+from bazarblot.solver.dd import Hands, brute_force_solve, solve, solve_from
 
 RULES = load_default()
 CONTRACT_TYPES = list(RULES.contracts.types)
@@ -241,6 +241,74 @@ def test_capot_hand_solves_to_the_full_deal_total() -> None:
     # entirely — not a realistic deal, just a clean bound-check.
     result = solve(hands, "C", leader=0, declaring_team=0, rules=RULES)
     assert 0 <= result.declarer_points <= 162
+
+
+# ---------------------------------------------------------------- solve_from (mid-trick entry)
+
+
+def test_solve_from_with_empty_trick_matches_solve() -> None:
+    """`solve()` is documented as the `trick_so_far=()` special case of `solve_from()` — this
+    pins that they actually agree, not just that the docstring claims it."""
+    for seed in range(20):
+        rng = random.Random(seed + 6_000_000)
+        hands = _reduced_hands(rng, 4)
+        contract_type = rng.choice(CONTRACT_TYPES)
+        leader = rng.randrange(4)
+        declaring_team = rng.randrange(2)
+        a = solve(hands, contract_type, leader, declaring_team, RULES)
+        b = solve_from(hands, contract_type, leader, (), declaring_team, RULES)
+        assert a.declarer_points == b.declarer_points
+        assert a.principal_variation == b.principal_variation
+        assert a.declarer_took_all_tricks == b.declarer_took_all_tricks
+
+
+def test_solve_from_agrees_with_a_sub_path_of_an_optimal_solve() -> None:
+    """A sub-path of an optimal minimax line is itself optimal for the position it starts from
+    — a standard property of minimax, and the property `agents/pimc.py` actually relies on when
+    it calls `solve_from` mid-trick. Verified by walking partway along a full `solve()`'s own PV,
+    snapshotting the position (including a partially-played current trick), and checking that
+    `solve_from` from that exact snapshot returns exactly the raw points still remaining along
+    the original PV — not merely "some value", the SAME value the original optimal line achieves
+    for the rest of the deal."""
+    for seed in range(15):
+        rng = random.Random(seed + 7_000_000)
+        hands = _reduced_hands(rng, 4)
+        contract_type = rng.choice(CONTRACT_TYPES)
+        leader = rng.randrange(4)
+        declaring_team = rng.randrange(2)
+        tables = build_tables(contract_type, RULES)
+
+        full = solve(hands, contract_type, leader, declaring_team, RULES)
+        pv = full.principal_variation
+        stop_at = rng.randrange(1, len(pv))  # a point strictly inside the PV, possibly mid-trick
+
+        live_hands = [set(h) for h in hands]
+        to_act = leader
+        trick: list[tuple[int, int]] = []
+        consumed = 0
+        for card in pv[:stop_at]:
+            live_hands[to_act].discard(card)
+            trick.append((to_act, card))
+            if len(trick) == 4:
+                winner = current_winner(tuple(trick), tables)
+                pts = sum(tables.points[c] for _, c in trick)
+                if not any(live_hands):
+                    pts += RULES.contracts.last_hand_bonus
+                if TEAM_OF[winner] == declaring_team:
+                    consumed += pts
+                to_act = winner
+                trick = []
+            else:
+                to_act = (to_act + 1) % 4
+
+        snapshot_hands: Hands = tuple(frozenset(h) for h in live_hands)  # type: ignore[assignment]
+        remaining = solve_from(
+            snapshot_hands, contract_type, to_act, tuple(trick), declaring_team, RULES
+        )
+        assert remaining.declarer_points == full.declarer_points - consumed, (
+            f"seed={seed} stop_at={stop_at}: "
+            f"expected {full.declarer_points - consumed}, got {remaining.declarer_points}"
+        )
 
 
 # ---------------------------------------------------------------- performance
