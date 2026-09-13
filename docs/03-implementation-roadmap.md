@@ -352,6 +352,61 @@ dev machine; (b) PIMC with `solve_threshold=4` completes a full deal in seconds 
 threshold; (c) the median full-deal solve time is re-measured, recorded here, and the regression
 guard tightened to it.
 
+### M2.5 status: **items 1-3 and 6 done; items 4-5 still deferred; (a) not met as originally stated — corrected below, not silently lowered**
+
+Built: `solver/batch.py` (`SolveSpec` + `solve_many`, a `multiprocessing.Pool` wrapper around
+`solve_from`, order-preserving, correct under `spawn`); `solver/dd.py` gained a public `Solver`
+class (item 3) that `solve()`/`solve_from()` are now thin one-shot wrappers around, so nothing
+about their existing behavior changed — verified by the full existing `test_solver_dd.py` suite
+passing unchanged; `agents/pimc.py` gained `solve_threshold` (item 2) and now constructs one
+`Solver` per sampled world, reused across every candidate card evaluated against that world
+(item 3), instead of a fresh, empty transposition table per card.
+
+**(a) — the batch-solving estimate was wrong, and the correction matters more than the fix
+itself.** A first measurement at `n=16` (8 workers) suggested ~1.2s/deal effective, extrapolating
+to "under 30 min for 1,000 deals." A second, larger measurement at `n=96` (12 workers, this
+machine's full core count) told a different story: **96 full-deal solves took 484.5s — ~5.0s/deal
+effective — extrapolating to ~84 minutes for 1,000 deals.** The `n=16` number was small-sample
+luck: per-deal solve time is heavily right-skewed (median ~6s, p95 ~43s, M2), so a pool's wall
+time is set by whichever worker draws the slow outliers, not the median, and 16 samples across 8
+workers is too few to reliably include one. `chunksize=1` was added to `solve_many` (spreads
+outliers across workers as they finish, rather than letting `Pool.map`'s default chunking hand
+several to the same unlucky worker at once) but this was not re-measured at the same `n=96` given
+the ~8-minute cost per run — it should help, is a standard technique for exactly this failure
+mode, and is real, low-risk code, but is not yet an independently confirmed number. **Take "~84
+minutes for 1,000 full deals on 12 cores" as the honest current baseline, not "under 30 min."**
+Still a large, real improvement over serial (which the heavy tail would push well past 12x
+that — likely 2+ hours, not just `84 x 12`), and entirely usable as an overnight or
+several-times-an-hour batch job for M5's oracle metrics; just not the number originally guessed.
+
+**(b) — exceeded, substantially.** A full deal (auction through termination) with **all four
+seats** played by `PIMCAgent(k=6, solve_threshold=4)` measured **0.07-0.14 seconds** across 10
+real deals (`test_pimc_with_solve_threshold_completes_full_deals_quickly`) — not merely "seconds"
+as targeted, because at `solve_threshold=4` only the last few tricks of each deal ever invoke a
+real DD solve, and reduced-hand solves at that size are near-instant (consistent with M2's own
+reduced-scale measurements). `test_pimc_declarer_matches_or_beats_heuristic_declarer_against_identical_defense`
+(already existing, M4) continues to pass unchanged.
+
+**Item 3's actual speedup, measured directly** (comparing PIMC's per-world candidate-card
+evaluation with vs. without a shared `Solver`): **1.55x** at a 5-card hand (5 legal cards, K=8)
+and **2.42x** at a 6-card hand (6 legal cards, K=4) — growing with hand size, as expected, since
+deeper remaining play means more overlap between different first moves' subtrees. Within the
+stated "plausibly 2-5x" estimate at the low end; a real, verified win, not a projection.
+
+**(c) — `solve()`'s own single-query speed is unchanged, correctly.** Items 1-3 change how the
+solver is *invoked* (in parallel, with a lower threshold before invoking it at all, or with a
+shared cache across sibling queries) — none of them touch `_Solver.search` or the transposition
+table's own logic. The M2-measured median 6.3s / p95 42.7s for one full-deal `solve()` call
+still stands, and `test_median_solve_time_is_a_measured_regression_guard`'s guard rail is
+unchanged — there is nothing here to re-tighten it to, since the thing it measures didn't change.
+
+**Items 4 (bitmask hands) and 5 (label harvest) remain deferred**, not attempted this pass —
+items 1-3 already closed most of the practical gap for M4/M5's actual needs (PIMC is now usable
+end-to-end; batch solving, while slower than first guessed, turns "infeasible" into "an overnight
+job"), and item 4 in particular touches `_Solver`'s internals directly, which is exactly the
+code with the most subtle-bug history in this project. Revisit only if M5's actual metrics still
+feel too expensive after (a)'s honest number sinks in.
+
 ---
 
 ## M3 — Environment layer (2–3 days)

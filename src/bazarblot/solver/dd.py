@@ -293,6 +293,52 @@ class _Solver:
         return best_value, best_pv
 
 
+class Solver:
+    """A reusable double-dummy solver for one `(contract_type, declaring_team, rules)` triple —
+    a thin public wrapper around `_Solver` that exposes its transposition table across MULTIPLE
+    `solve_from`-style queries, rather than throwing it away after one (M2.5 item 3).
+
+    The motivating caller is `agents/pimc.py`: PIMC evaluates every legal candidate card from the
+    same sampled world, and those candidates' subtrees overlap heavily (the last several plies of
+    "play this card, then optimal continuation" are often identical or near-identical across
+    different first moves). Reusing one `Solver` — hence one transposition table — across that
+    whole batch of queries turns repeated, wasted sub-search into cache hits, with no change to
+    the algorithm or its correctness: the TT key is the exact `(hands, to_act, trick)` position
+    throughout (see the module docstring), so reusing it across different STARTING queries is
+    exactly what a persistent transposition table is for — no different, in kind, from reusing it
+    across the recursive calls a single `solve()` already makes internally.
+
+    `solve()`/`solve_from()` below are one-shot convenience wrappers around a fresh `Solver` for
+    a single query; construct a `Solver` directly and call `solve_from` on it repeatedly whenever
+    you have more than one query against the same contract/declaring-team/rules."""
+
+    def __init__(self, contract_type: ContractType, declaring_team: int, rules: RuleConfig) -> None:
+        self.contract_type = contract_type
+        self.declaring_team = declaring_team
+        self.tables = build_tables(contract_type, rules)
+        self._solver = _Solver(self.tables, contract_type, declaring_team, rules)
+
+    @property
+    def nodes(self) -> int:
+        """Cumulative node count across every `solve_from` call made on this instance so far —
+        not reset between calls, since the point is to see the whole batch's cost."""
+        return self._solver.nodes
+
+    def solve_from(self, hands: Hands, to_act: int, trick_so_far: Trick = ()) -> DDResult:
+        """Same contract as the module-level `solve_from` function, minus the arguments this
+        instance already fixed at construction (`contract_type`, `declaring_team`, `rules`)."""
+        value, pv = self._solver.search(hands, to_act, trick_so_far, 0, _BIG)
+        all_tricks = _pv_all_tricks_to_declarer(
+            pv, to_act, trick_so_far, self.tables, self.declaring_team
+        )
+        return DDResult(
+            declarer_points=value,
+            declarer_took_all_tricks=all_tricks,
+            principal_variation=pv,
+            nodes=self._solver.nodes,
+        )
+
+
 def solve(
     hands: Hands,
     contract_type: ContractType,
@@ -302,8 +348,9 @@ def solve(
 ) -> DDResult:
     """Solve one deal's play phase to completion, from the start of a fresh trick led by
     `leader`. See `DDResult` for exactly what `declarer_points` does and does not include.
-    `solve_from` is the general form this delegates to (`trick_so_far=()`)."""
-    return solve_from(hands, contract_type, leader, (), declaring_team, rules)
+    `solve_from` is the general form this delegates to (`trick_so_far=()`). A one-shot
+    convenience wrapper around `Solver` — construct a `Solver` directly for repeated queries."""
+    return Solver(contract_type, declaring_team, rules).solve_from(hands, leader, ())
 
 
 def solve_from(
@@ -324,17 +371,10 @@ def solve_from(
     exactly what the recursive case does at every non-trick-ending ply), this just exposes it as
     a public entry point. `agents/pimc.py` is the first caller: PIMC has to compare candidate
     cards from whatever position the human/agent seat actually faces, most of which are mid-trick.
-    """
-    tables = build_tables(contract_type, rules)
-    solver = _Solver(tables, contract_type, declaring_team, rules)
-    value, pv = solver.search(hands, to_act, trick_so_far, 0, _BIG)
-    all_tricks = _pv_all_tricks_to_declarer(pv, to_act, trick_so_far, tables, declaring_team)
-    return DDResult(
-        declarer_points=value,
-        declarer_took_all_tricks=all_tricks,
-        principal_variation=pv,
-        nodes=solver.nodes,
-    )
+
+    A one-shot convenience wrapper around `Solver` — construct a `Solver` directly and reuse it
+    when making more than one query against the same `(contract_type, declaring_team, rules)`."""
+    return Solver(contract_type, declaring_team, rules).solve_from(hands, to_act, trick_so_far)
 
 
 def _pv_all_tricks_to_declarer(

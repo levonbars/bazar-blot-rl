@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import random
+import time
 
 import pytest
 
@@ -24,7 +25,7 @@ from bazarblot.core.rules import load_default
 from bazarblot.env.actions import build_action_space, legal_mask
 from bazarblot.env.infoset import info_set
 from bazarblot.env.tracked_deal import TrackedDeal
-from bazarblot.solver.dd import solve_from
+from bazarblot.solver.dd import Solver, solve_from
 
 RULES = load_default()
 SPACE = build_action_space(RULES)
@@ -163,12 +164,11 @@ def test_value_of_playing_max_matches_solve_from_at_reduced_scale() -> None:
         to_act = rng.randrange(4)
         declaring_team = rng.randrange(2)
         tables = build_tables(contract_type, RULES)
+        last_hand_bonus = RULES.contracts.last_hand_bonus
 
         legal = legal_moves(hands[to_act], (), to_act, contract_type, RULES, tables)
-        values = [
-            _value_of_playing(hands, contract_type, to_act, (), c, declaring_team, RULES)
-            for c in legal
-        ]
+        solver = Solver(contract_type, declaring_team, RULES)
+        values = [_value_of_playing(solver, hands, to_act, (), c, last_hand_bonus) for c in legal]
         expected = solve_from(hands, contract_type, to_act, (), declaring_team, RULES)
         maximizing = TEAM_OF[to_act] == declaring_team
         actual = max(values) if maximizing else min(values)
@@ -178,6 +178,36 @@ def test_value_of_playing_max_matches_solve_from_at_reduced_scale() -> None:
 
 
 # ---------------------------------------------------------------- end-to-end
+
+
+def test_pimc_with_solve_threshold_completes_full_deals_quickly() -> None:
+    """M2.5 item 2's whole point: with `solve_threshold` set low, PIMC plays the bulk of a deal
+    with the cheap fallback and only actually DD-solves once few enough cards remain — turning
+    "correct but needs minutes per decision at full hand size" into a deal a test suite can
+    afford to play out completely, every build, all four seats using PIMC."""
+    pimc = PIMCAgent(RULES, k=6, solve_threshold=4, rng=random.Random(0))
+    times: list[float] = []
+    for seed in range(10):
+        rng = random.Random(seed)
+        hands = deal_hands(rng, RULES)
+        deal = Deal(RULES, dealer=seed % 4, hands=hands, deal_id=seed)
+        tracked = TrackedDeal(deal)
+        start = time.perf_counter()
+        steps = 0
+        while deal.phase in (Phase.AUCTION, Phase.PLAY) and steps < 300:
+            seat = deal.to_act
+            info = info_set(tracked, seat, match_score=(0, 0), deal_number=0)
+            mask = legal_mask(info, SPACE)
+            action = pimc.act(info, SPACE, mask)
+            assert mask[action], f"seed={seed}: PIMC chose an illegal action"
+            tracked.step(SPACE.decode(action))
+            steps += 1
+        times.append(time.perf_counter() - start)
+        assert deal.phase in (Phase.TERMINAL, Phase.ABORTED)
+
+    # Generous guard rail (a full deal at this threshold measures well under 1s on a dev
+    # machine) — this is a regression guard, not a tight performance claim.
+    assert max(times) < 10.0, f"a full deal took {max(times):.2f}s with solve_threshold=4"
 
 
 def test_pimc_only_ever_plays_legal_actions_near_endgame() -> None:

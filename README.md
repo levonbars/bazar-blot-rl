@@ -148,6 +148,23 @@ evaluation, but not yet fast enough to sit in a self-play or PIMC inner loop —
 future work (a compiled backend, or a correctly-designed cross-position reduction nobody has built
 for this ruleset yet).
 
+**M2.5** revisits that gap the cheap way — a dependency check found `agents/pimc.py` is the DD
+solver's *only* runtime consumer (self-play training, M7/M8, has zero dependency on it), so the
+original 5ms target is retired in favor of making the actual downstream uses affordable. Three
+changes landed: `solver/batch.py` parallelizes solving across processes; `solver/dd.py` gained a
+public `Solver` class so repeated queries against the same contract/team can share one
+transposition table instead of starting fresh each time; and `PIMCAgent` gained
+`solve_threshold`, so it plays large hands with a cheap heuristic and only DD-solves once few
+enough cards remain. The last one is the standout result: a **full deal, all four seats, PIMC
+with `solve_threshold=4`, completes in 0.07-0.14 seconds** — not "seconds" as targeted, because
+near-endgame solves are cheap. The transposition-table sharing measured a real 1.6-2.4x speedup
+on PIMC's own candidate-card evaluation. The batch-solving estimate, though, needed an honest
+correction: a small first measurement suggested ~30 minutes for 1,000 full deals; a larger,
+more representative one (96 deals, 12 workers) found the per-deal cost distribution is heavy-
+tailed enough that the real number is **closer to 84 minutes** — still a large win over serial,
+just not the number first guessed. Full account in `docs/03-implementation-roadmap.md`'s M2.5
+status section, including why the first estimate was wrong, not just what the second one says.
+
 **M3** (`src/bazarblot/env/`) adds the RL-facing environment layer: an `InfoSet` security
 boundary derived independently from the UI's own (`ui/views.py` and `env/infoset.py` are two
 separate implementations of "what can seat X see," each with its own test suite), a flat
