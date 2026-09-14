@@ -92,7 +92,7 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0 through M4 complete.**
+**M0 through M5 complete.**
 
 The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
 and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
@@ -204,8 +204,30 @@ against *identical* defense from the *identical* snapshot. See
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M4 for the full account
 of what's verified and what isn't.
 
-Next: **M5** (the paired/duplicate evaluation harness — needed before any of these three
-comparisons can be made rigorous at full scale, and before any training run in M7).
+**M5** (`src/bazarblot/eval/`) adds the paired/duplicate evaluation harness the whole project
+runs on from here — the roadmap's own rule is that no unpaired comparison is trustworthy at any
+affordable sample size, given how much Belote's per-deal variance dominates. `duplicate.py`
+plays every comparison as a duplicate pair (same shuffle, seats swapped) or duplicate match;
+`metrics.py` wraps that in `bootstrap_ci` and two cost tiers — `evaluate_pairs` (cheap, no DD
+solving) and `evaluate_dd_oracle_metrics` (expensive, 5+ full solves per deal via the M2.5 batch
+solver); `elo.py` runs a round-robin pool on the same paired primitive. The roadmap's own
+"done when" bar is met formally, not just observed once: 300 duplicate pairs of random-vs-random
+give a paired mean CI that contains 0, and heuristic-vs-random gives a mean margin over 100 with
+a CI nowhere near 0 — both in under 8 seconds.
+
+Building the pairing primitive surfaced a real bug worth knowing about: naively letting each side
+of a "duplicate" pair redeal its own 4-pass abort (matching how live play behaves) can silently
+break the "same shuffle" guarantee the whole method depends on, if one side's bidding aborts a
+shuffle the other side's doesn't. Fixed by discarding and resampling the whole pair on any abort
+rather than redealing within one side — see
+[`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M5 for that and a second,
+related ordering bug the fix's own test caught. The harness also surfaced a genuine finding about
+M4's heuristic bidder (it only competes against an overbidding opponent on inflated, ceiling-capped
+estimates, and reliably fails those) — left unfixed here on purpose, since fixing agent quality is
+a different task than building the tool that found the issue.
+
+Next: **M6** (throughput, gated on measurement) or **M7** (the first learning run) — M5's harness
+is the thing both were waiting on.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

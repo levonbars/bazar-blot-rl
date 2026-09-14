@@ -577,6 +577,72 @@ with a CI that contains 0, and `heuristic vs random` gives a tight, reproducible
 Building this before training is not optional — otherwise you will not be able to tell whether
 your first learning run worked.
 
+### M5 status: **complete**
+
+Built as `src/bazarblot/eval/`: `duplicate.py` (`play_deal_once`, `play_duplicate_pair`,
+`play_duplicate_match` — the paired primitives everything else builds on), `metrics.py`
+(`bootstrap_ci` + `evaluate_pairs` + `evaluate_dd_oracle_metrics`), `elo.py` (`run_round_robin`).
+Depends on `core/`, `env/`, `agents/`, `solver/` — never `ui/`.
+
+**Done-when criteria pass, formally, not just informally observed:**
+`test_random_vs_random_paired_margin_ci_contains_zero` (300 pairs, no DD-solving) gives a paired
+mean of essentially 0 with a CI that contains it; `test_heuristic_vs_random_paired_margin_is_tight_and_excludes_zero`
+(same scale) gives a mean margin over 100 with a CI tight relative to its own size and nowhere
+near 0. Both run in the fast tier — under 8 seconds for both together.
+
+**A real correctness bug was found and fixed while building the pairing primitive itself: the
+"same shuffle, seats swapped" guarantee could silently break on an aborted deal.** `env/aec.py`
+(live play) transparently redeals a 4-pass abort and keeps going — correct there, since a live
+game must continue. `eval/duplicate.py` cannot do the same: if policy X's bidding aborts a
+shuffle but policy Y's doesn't (or vice versa), and each side of a pair independently redeals its
+own abort, the two "duplicate" runs would silently end up on DIFFERENT hands from that point on —
+exactly the deal-variance contamination the whole harness exists to remove. Fixed by never
+redealing within a run at all: `play_deal_once` returns `None` on an abort, and the pair/match
+functions discard the WHOLE pair and resample a fresh top-level seed, keeping the guarantee exact
+rather than approximate. A second, related bug surfaced writing the test for this: an early
+`continue` after checking only the first of the two runs at a trial meant WHICH seat assignment
+got checked first could change which trial a pair settled on — making `play_duplicate_pair(seed,
+X, Y)` and `play_duplicate_pair(seed, Y, X)` land on genuinely different deals in some cases
+(confirmed empirically: different contract types between the two, not just different scores).
+Fixed by always checking both assignments at a trial before deciding whether to resample. Both
+are documented at their sites in `eval/duplicate.py` rather than fixed silently. (`play_duplicate_match`
+keeps the cheaper single-sided short-circuit deliberately — a full match is many deals deep, and
+nothing here depends on or tests match-level order-invariance the way the deal-level primitive's
+own test suite now does.)
+
+**A real finding about the M4 heuristic bidder, surfaced by the harness rather than assumed:**
+`HeuristicAgent` only ever ends up declaring against an aggressively-overbidding `RandomAgent` in
+the rare cases its own estimate is inflated by a large combination and gets capped at the bid
+ladder's ceiling (level 80) — and in a 600-instance sample, every single one of those (10/10)
+then failed. This is a real calibration gap (the bidder's combo-value estimate has no discount
+for the risk that an opponent's combination beats it) that doesn't block M4's own "beats random
+by a wide margin" bar — the overall paired margin is still overwhelmingly positive — but is
+exactly the kind of thing an evaluation harness is supposed to catch. Left unfixed here
+deliberately: fixing agent quality is a different task than building the harness that found the
+issue, and is noted as a candidate follow-up rather than scope-crept into M5.
+
+**`evaluate_dd_oracle_metrics` is the expensive tier, kept clearly separate from `evaluate_pairs`
+rather than blended into one function.** It needs 5 full DD solves per deal (one per candidate
+contract type, via `solver/batch.py`) plus one more for the actual contract — 20 solves for a
+4-deal smoke sample measured at ~81s on 8 workers, consistent with M2/M2.5's documented per-solve
+cost. Its `points_lost_vs_optimal` metric is explicitly documented as NOT bounded at zero: it
+compares the actual outcome to the double-dummy "par" value (optimal play from BOTH sides), so a
+real opponent playing worse than double-dummy-optimal defense can push it negative — a real
+property of the metric (spec §9's own framing, "how much worse than a cheating player"), not a
+bug, and worth knowing before reading a table of these numbers. Its "oracle bid" is also narrower
+than a fully rigorous one: it uses the REAL four hands from the deal that actually happened (no
+sampling needed — the deal is already ground truth) rather than modeling the auction's actual
+competitive dynamics, which the environment spec itself (§8) only ever calls "approximable."
+
+**`run_round_robin`** plays every distinct pair in a named agent pool via `play_duplicate_pair`
+and updates standard Elo (win/loss/draw from the pair's margin sign, not magnitude) — heuristic
+vs. random separates by >400 points in a smoke test, consistent with the duplicate-margin finding.
+
+Full project suite passes (23 new tests across `eval/` and `core/dealing.py`'s new `deal_seed`);
+`mypy --strict` and `ruff` are clean; `eval/` sits at 60-98% coverage per file in the fast tier
+alone (the expensive DD-oracle path only gets exercised by its slow-marked test, matching the
+established pattern for every other expensive path in this project).
+
 ---
 
 ## M6 — Throughput (2–4 days, gated on measurement)

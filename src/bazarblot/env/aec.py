@@ -38,6 +38,7 @@ from pettingzoo import AECEnv
 from bazarblot.core.cards import TEAM_OF
 from bazarblot.core.deal import Deal, Phase
 from bazarblot.core.dealing import deal_hands
+from bazarblot.core.dealing import deal_seed as _shared_deal_seed
 from bazarblot.core.match import Match
 from bazarblot.core.rules import RuleConfig, load_default
 from bazarblot.env.actions import ActionSpace, build_action_space, legal_mask
@@ -114,9 +115,7 @@ class BazarBlotAEC(AECEnv):
     # ---------------------------------------------------------------- dealing
 
     def _deal_seed(self) -> int:
-        return (
-            self._seed * 1_000_003 + self.match.deal_number * 97 + self._redeal_attempt
-        ) & 0x7FFFFFFF
+        return _shared_deal_seed(self._seed, self.match.deal_number, self._redeal_attempt)
 
     def _new_tracked_deal(self) -> TrackedDeal:
         rng = random.Random(self._deal_seed())
