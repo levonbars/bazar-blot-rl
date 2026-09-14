@@ -178,25 +178,24 @@ def decide(
     )
 
 
-def recompute_log_prob(
-    net: PolicyValueNet,
+def _recompute_log_prob_from_output(
     space: ActionSpace,
-    obs: Tensor,
+    out: dict[str, Tensor],
     mask: BoolArray,
     phase: Phase,
     base: int,
     action_idx: int,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Re-run the SAME hierarchical decomposition `decide()` used, but scoring the action that was
-    actually taken (`action_idx`) under the CURRENT network parameters, with gradients -- what the
-    PPO update needs for the importance ratio and the value/entropy losses. Returns
-    `(log_prob, entropy, value)`, each a 0-d tensor."""
-    out = net(obs.unsqueeze(0))
-    value = out["value"][0]
+    """The scoring half of `recompute_log_prob`, taking an ALREADY-COMPUTED, single-sample
+    (no batch dimension) network output `out` rather than running the network itself -- lets
+    `learn/ppo.py` batch the expensive forward pass across a whole minibatch (one `net(obs_batch)`
+    call) and then call this cheap, network-free function once per sample to do the per-sample
+    hierarchical bookkeeping, instead of one full forward pass per transition."""
+    value = out["value"]
 
     if phase == Phase.PLAY:
         card_mask = torch.from_numpy(mask[space.play_start : space.action_dim])
-        card_dist = _masked_categorical(out["card"][0], card_mask)
+        card_dist = _masked_categorical(out["card"], card_mask)
         card_idx = torch.tensor(action_idx - space.play_start)
         return card_dist.log_prob(card_idx), card_dist.entropy(), value
 
@@ -208,7 +207,7 @@ def recompute_log_prob(
     meta_mask[META_CONTRA] = bool(mask[1])
     meta_mask[META_RECONTRA] = bool(mask[2])
     meta_mask[META_BID] = legality.any_bid_legal()
-    meta_dist = _masked_categorical(out["meta"][0], meta_mask)
+    meta_dist = _masked_categorical(out["meta"], meta_mask)
 
     if action_idx == PASS_IDX:
         meta = torch.tensor(META_PASS)
@@ -232,24 +231,45 @@ def recompute_log_prob(
     entropy = meta_dist.entropy()
 
     delta_mask = torch.from_numpy(legality.delta_mask)
-    delta_dist = _masked_categorical(out["delta"][0, : delta_mask.shape[0]], delta_mask)
+    delta_dist = _masked_categorical(out["delta"][: delta_mask.shape[0]], delta_mask)
     delta_t = torch.tensor(delta - 1)
     log_prob = log_prob + delta_dist.log_prob(delta_t)
     entropy = entropy + delta_dist.entropy()
 
     type_mask = torch.from_numpy(legality.type_mask_given_delta[delta - 1])
-    type_dist = _masked_categorical(out["type"][0], type_mask)
+    type_dist = _masked_categorical(out["type"], type_mask)
     type_t = torch.tensor(type_idx)
     log_prob = log_prob + type_dist.log_prob(type_t)
     entropy = entropy + type_dist.entropy()
 
     capot_mask = torch.from_numpy(legality.capot_mask_given_delta_type[delta - 1, type_idx])
-    capot_dist = _masked_categorical(out["capot"][0], capot_mask)
+    capot_dist = _masked_categorical(out["capot"], capot_mask)
     capot_t = torch.tensor(capot_idx)
     log_prob = log_prob + capot_dist.log_prob(capot_t)
     entropy = entropy + capot_dist.entropy()
 
     return log_prob, entropy, value
+
+
+def recompute_log_prob(
+    net: PolicyValueNet,
+    space: ActionSpace,
+    obs: Tensor,
+    mask: BoolArray,
+    phase: Phase,
+    base: int,
+    action_idx: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Re-run the SAME hierarchical decomposition `decide()` used, but scoring the action that was
+    actually taken (`action_idx`) under the CURRENT network parameters, with gradients -- what the
+    PPO update needs for the importance ratio and the value/entropy losses. Returns
+    `(log_prob, entropy, value)`, each a 0-d tensor.
+
+    Single-sample convenience wrapper around `_recompute_log_prob_from_output` -- `learn/ppo.py`
+    calls that directly on a batched forward pass instead, for throughput."""
+    out = net(obs.unsqueeze(0))
+    out_i = {k: v[0] for k, v in out.items()}
+    return _recompute_log_prob_from_output(space, out_i, mask, phase, base, action_idx)
 
 
 class NNAgent:
