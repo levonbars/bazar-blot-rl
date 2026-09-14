@@ -62,7 +62,25 @@ class RolloutStats:
     n_aborted: int = 0
     n_transitions: int = 0
     n_opponent_deals: int = 0
+    n_contested_completed: int = 0
+    n_learner_declared_contested: int = 0
     raw_margins: list[float] = field(default_factory=list)
+
+    @property
+    def learner_declare_rate(self) -> float | None:
+        """Fraction of COMPLETED opponent-mix deals where the learner's own team won the
+        auction, i.e. actually chose to bid rather than concede it. `None` when no opponent-mix
+        deal completed this rollout to measure it from.
+
+        Deliberately excludes pure self-play deals: there, "who declared" is uninformative (both
+        teams are the identical network, so it says nothing about skill), and PURE self-play's
+        own abort rate can be near 100% even for a healthy policy playing a FIXED opponent well
+        (see `docs/03-implementation-roadmap.md` M7: the checkpoint that beat `heuristic`/`random`
+        turned out to never once declare against them -- a pure pass-and-defend strategy -- and
+        this is the stat that would have caught it during training instead of only after)."""
+        if self.n_contested_completed == 0:
+            return None
+        return self.n_learner_declared_contested / self.n_contested_completed
 
 
 def _play_one(
@@ -72,12 +90,16 @@ def _play_one(
     dealer: int,
     learner: PolicyValueNet,
     seat_actors: dict[int, Opponent],
-) -> tuple[dict[int, list[Transition]], float, bool]:
+    forced_bid_prob: float = 0.0,
+) -> tuple[dict[int, list[Transition]], float, bool, int | None]:
     """Play one deal; `seat_actors[seat]` decides seat `seat`'s actions -- either `learner`
     itself, a frozen `PolicyValueNet` snapshot from the opponent pool, or an arbitrary `Agent`
     (a fixed baseline like `HeuristicAgent`, see `collect_rollout`'s docstring on why the pool
     can hold both). Returns `(transitions by learner seat, unsquashed margin for team 0,
-    aborted)`.
+    aborted, attackers_team)` -- `attackers_team` is `None` when the deal aborted (no contract to
+    have an attacking team at all). `forced_bid_prob` is applied only to the LEARNER's own
+    auction decisions (see `agents/nn/ppo_agent.py::_auction_decision`) -- opponents play
+    unperturbed, exactly as they would for real.
 
     **A 4-pass abort is scored as a real, zero-margin outcome -- it is NOT discarded**, unlike
     `eval/duplicate.py`, which discards and resamples specifically to preserve its "identical
@@ -107,7 +129,9 @@ def _play_one(
         mask = legal_mask(info, space)
         actor = seat_actors[seat]
         if actor is learner:
-            decision = decide(learner, info, space, mask, sample=True)
+            decision = decide(
+                learner, info, space, mask, sample=True, forced_bid_prob=forced_bid_prob
+            )
             transitions[seat].append(Transition(decision=decision))
             action_idx = decision.action_idx
         elif isinstance(actor, PolicyValueNet):
@@ -117,10 +141,10 @@ def _play_one(
         tracked.step(space.decode(action_idx))
 
     if deal.phase == Phase.ABORTED:
-        return transitions, 0.0, True
+        return transitions, 0.0, True, None
     assert deal.result is not None
     team0, team1 = deal.result.team_scores
-    return transitions, float(team0 - team1), False
+    return transitions, float(team0 - team1), False, deal.result.attackers_team
 
 
 def collect_rollout(
@@ -133,8 +157,14 @@ def collect_rollout(
     opponent_prob: float = 0.0,
     gamma: float = 1.0,
     lam: float = 0.95,
+    forced_bid_prob: float = 0.0,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
+
+    `forced_bid_prob` (see `agents/nn/ppo_agent.py::_auction_decision`) biases the LEARNER's own
+    auction sampling toward `BID` during collection, without touching what `legal_mask` itself
+    says is legal and without corrupting the recorded log-probabilities PPO's update depends on.
+    Zero by default (no effect); `learn/train.py` anneals it down over a training run.
 
     Each shuffle is either pure self-play (all four seats `learner`) or, with probability
     `opponent_prob` when `opponent_pool` is non-empty, `learner` at two seats against one
@@ -178,12 +208,17 @@ def collect_rollout(
             seat_assignments = ({0: learner, 1: learner, 2: learner, 3: learner},)
 
         for seat_actors in seat_assignments:
-            transitions, margin_team0, aborted = _play_one(
-                rules, space, deal_seed_value, dealer, learner, seat_actors
+            transitions, margin_team0, aborted, attackers_team = _play_one(
+                rules, space, deal_seed_value, dealer, learner, seat_actors, forced_bid_prob
             )
             stats.n_deals += 1
             if aborted:
                 stats.n_aborted += 1
+            elif use_opponent:
+                stats.n_contested_completed += 1
+                learner_team = 0 if seat_actors[0] is learner else 1
+                if attackers_team == learner_team:
+                    stats.n_learner_declared_contested += 1
             stats.raw_margins.append(margin_team0)
             for seat, seat_transitions in transitions.items():
                 if not seat_transitions:

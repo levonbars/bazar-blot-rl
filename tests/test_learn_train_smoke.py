@@ -13,9 +13,40 @@ torch = pytest.importorskip("torch")
 from bazarblot.core.rules import load_default  # noqa: E402
 from bazarblot.learn.checkpoint import load_checkpoint  # noqa: E402
 from bazarblot.learn.ppo import PPOConfig  # noqa: E402
-from bazarblot.learn.train import TrainConfig, train  # noqa: E402
+from bazarblot.learn.train import (  # noqa: E402
+    TrainConfig,
+    _entropy_coef_at,
+    _forced_bid_prob_at,
+    train,
+)
 
 RULES = load_default()
+
+
+def test_entropy_coef_anneals_linearly_from_start_to_end() -> None:
+    config = TrainConfig(n_iterations=101, entropy_coef_start=0.05, entropy_coef_end=0.02)
+    assert _entropy_coef_at(0, config) == pytest.approx(0.05)
+    assert _entropy_coef_at(100, config) == pytest.approx(0.02)
+    assert _entropy_coef_at(50, config) == pytest.approx(0.035)
+
+
+def test_entropy_coef_at_handles_single_iteration_run() -> None:
+    config = TrainConfig(n_iterations=1, entropy_coef_start=0.05, entropy_coef_end=0.02)
+    assert _entropy_coef_at(0, config) == pytest.approx(0.05)
+
+
+def test_forced_bid_prob_anneals_then_holds_at_end_value() -> None:
+    config = TrainConfig(
+        n_iterations=100,
+        forced_bid_prob_start=0.4,
+        forced_bid_prob_end=0.0,
+        forced_bid_anneal_frac=0.5,
+    )
+    assert _forced_bid_prob_at(0, config) == pytest.approx(0.4)
+    assert _forced_bid_prob_at(25, config) == pytest.approx(0.2)
+    # past the anneal fraction (iteration >= 50), held at the end value
+    assert _forced_bid_prob_at(50, config) == pytest.approx(0.0)
+    assert _forced_bid_prob_at(99, config) == pytest.approx(0.0)
 
 
 def test_train_smoke_runs_end_to_end(tmp_path) -> None:  # type: ignore[no-untyped-def]

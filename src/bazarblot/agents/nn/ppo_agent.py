@@ -64,7 +64,12 @@ class Decision:
 
 
 def _auction_decision(
-    info: InfoSet, space: ActionSpace, mask: BoolArray, out: dict[str, Tensor], sample: bool
+    info: InfoSet,
+    space: ActionSpace,
+    mask: BoolArray,
+    out: dict[str, Tensor],
+    sample: bool,
+    forced_bid_prob: float = 0.0,
 ) -> tuple[int, Tensor]:
     base = base_level(info)
     legality = bid_legality(mask, space, base)
@@ -75,7 +80,26 @@ def _auction_decision(
     meta_mask[META_RECONTRA] = bool(mask[2])
     meta_mask[META_BID] = legality.any_bid_legal()
     meta_dist = _masked_categorical(out["meta"][0], meta_mask)
-    meta = meta_dist.sample() if sample else meta_dist.probs.argmax()
+    force_bid = (
+        sample
+        and meta_mask[META_BID]
+        and forced_bid_prob > 0.0
+        and torch.rand(()) < forced_bid_prob
+    )
+    if force_bid:
+        # Forced-exploration override (annealed by `learn/train.py` over the run): sample from a
+        # BIASED behavior distribution during rollout collection only, but score the resulting
+        # action under `meta_dist` -- the network's own TRUE (unbiased) distribution -- exactly
+        # like every other path here. PPO's importance ratio only needs `log_prob` to be an
+        # accurate probability of the action under the policy being optimized, not under whatever
+        # distribution generated it; recording the true `meta_dist.log_prob` keeps the math
+        # correct despite the biased sampling. See `learn/train.py`'s docstring on why this
+        # exists: without it, self-play converges to a pure pass-and-defend policy that never
+        # once declares even against a real opponent (`docs/03-implementation-roadmap.md` M7) --
+        # entropy bonuses alone, even large and slowly-annealed ones, did not prevent it.
+        meta = torch.tensor(META_BID)
+    else:
+        meta = meta_dist.sample() if sample else meta_dist.probs.argmax()
     log_prob = meta_dist.log_prob(meta)
 
     if int(meta.item()) != META_BID:
@@ -115,19 +139,30 @@ def _play_decision(
 
 
 def decide(
-    net: PolicyValueNet, info: InfoSet, space: ActionSpace, mask: BoolArray, sample: bool
+    net: PolicyValueNet,
+    info: InfoSet,
+    space: ActionSpace,
+    mask: BoolArray,
+    sample: bool,
+    forced_bid_prob: float = 0.0,
 ) -> Decision:
     """One full decision: encode `info`, run the network, sample (or, if `sample=False`, take the
     greedy action) under the phase-appropriate hierarchical mask, and package everything
     `learn/rollout.py` needs to later recompute this same log-probability under updated
-    parameters."""
+    parameters.
+
+    `forced_bid_prob` (rollout collection only, see `_auction_decision`'s docstring) biases
+    auction-phase sampling toward `BID` without affecting the recorded log-probability's
+    correctness."""
     obs_np = flatten(encode(info)).astype(np.float32)
     obs = torch.from_numpy(obs_np).unsqueeze(0)
     with torch.no_grad():
         out = net(obs)
         value = float(out["value"][0].item())
         if info.phase == Phase.AUCTION:
-            action_idx, log_prob_t = _auction_decision(info, space, mask, out, sample)
+            action_idx, log_prob_t = _auction_decision(
+                info, space, mask, out, sample, forced_bid_prob
+            )
         elif info.phase == Phase.PLAY:
             action_idx, log_prob_t = _play_decision(space, mask, out, sample)
         else:

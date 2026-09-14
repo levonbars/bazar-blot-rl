@@ -78,6 +78,42 @@ def test_opponent_pool_accepts_a_mix_of_networks_and_plain_agents() -> None:
     assert len(transitions) == stats.n_transitions
 
 
+def test_learner_declare_rate_is_none_without_opponent_mix() -> None:
+    """Pure self-play (`opponent_prob=0`, the default) has no meaningful "did the learner
+    declare" signal -- both teams are the identical network, so the stat must stay `None` rather
+    than report a number that says nothing about skill."""
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    _transitions, stats = collect_rollout(RULES, SPACE, net, n_deals=15, seed=0)
+    assert stats.learner_declare_rate is None
+    assert stats.n_contested_completed == 0
+
+
+def test_learner_declare_rate_tracks_contested_deals_only() -> None:
+    """Regression test for the finding that a policy which never once declares against a real
+    opponent can still clear `evaluate_pairs`'s CI-excluding-zero bar on pure pass-and-defend
+    (see `docs/03-implementation-roadmap.md` M7) -- this is the stat that makes that visible
+    DURING training. With `opponent_prob=1.0`, every deal is contested, so the rate must be
+    computable and consistent with the raw counters."""
+    torch.manual_seed(0)
+    learner = build_network(RULES)
+    heuristic = HeuristicAgent(RULES)
+    _transitions, stats = collect_rollout(
+        RULES,
+        SPACE,
+        learner,
+        n_deals=20,
+        seed=0,
+        opponent_pool=[heuristic],
+        opponent_prob=1.0,
+    )
+    assert stats.n_contested_completed > 0
+    rate = stats.learner_declare_rate
+    assert rate is not None
+    assert rate == pytest.approx(stats.n_learner_declared_contested / stats.n_contested_completed)
+    assert 0.0 <= rate <= 1.0
+
+
 def test_deal_margin_reward_is_antisymmetric() -> None:
     for margin in (0.0, 8.0, 56.0, 216.0, -216.0):
         assert deal_margin_reward(margin) == pytest.approx(-deal_margin_reward(-margin))
