@@ -656,6 +656,71 @@ Profile first. Measure deals/s for engine-only and engine+encode.
 
 **Done when:** documented deals/s number, and (if ported) the differential test passes.
 
+### M6 status: **complete**
+
+**Profiled first, via a purpose-built benchmark (`cli/bench_throughput.py`, `python -m
+bazarblot.cli.bench_throughput`) rather than guessing.** It measures two configurations against
+independent uniformly-random-legal play (no agents, no DD solving): "engine-only" (`core/` alone —
+what a hypothetical Rust port would need to beat) and "engine+encode" (`InfoSet` construction,
+`legal_mask`, full `encode()`/`flatten()` at every decision — what a real self-play loop actually
+pays per step). `cProfile`/`pstats` (sorted by cumulative time) on each configuration located the
+actual hot paths rather than assuming them.
+
+**Baseline: engine-only ~5,300 deals/s (already comfortably fine — this is the ceiling a Rust port
+of `core/` alone would chase, and it isn't the bottleneck); engine+encode started at 104 deals/s.**
+Three real inefficiencies were found and fixed, each verified behavior-preserving before moving to
+the next, none touching game logic or correctness:
+
+1. **`env/actions.py::legal_mask`'s auction branch enumerated `is_legal` once per `(level,
+   contract_type, capot)`,** the single largest cost in the profile (~1.6M `is_legal` calls across
+   the benchmark). `core.auction.is_legal`'s `BidAction` branch only ever rejects a `contract_type`
+   outside `rules.contracts.types` — which every type in `space.contract_types` trivially satisfies
+   by construction — so contract type never actually affects legality at a given `(level, capot)`.
+   Rewrote to probe once per `(level, capot)` and fan the result out across all contract types, a
+   `len(contract_types)`-fold (5x for the shipped preset) reduction with no behavior change,
+   verified by `test_legal_mask_matches_core_legality_on_random_deals` continuing to pass unchanged.
+2. **Meld detection (`detect_all_melds`) was recomputed from scratch on every single decision**
+   inside `env/infoset.py::info_set()`, despite being a pure function of `deal.original_hands` and
+   `deal.contract.contract_type` — both fixed for the entire PLAY phase once the auction closes.
+   Added `TrackedDeal.melds_cache`, populated lazily the first time `info_set()` needs it for a
+   deal and reused for every subsequent decision in that same deal.
+3. **`env/obs.py::_contract_progress_block` re-detected melds a second time per decision**, via
+   `resolve_combinations(_shown_cards_by_seat(info), ...)` — flattening the already-cached
+   `info.melds_by_seat` back into hand-like frozensets just to re-run `detect_all_melds` on them
+   inside `resolve_combinations`. This was masked by fix 2 above (a debug script with a
+   monkeypatched `detect_all_melds` counter confirmed the `info_set()` call site really had dropped
+   to once per deal) and was, once isolated, the actual dominant remaining cost — not the smaller
+   secondary item it looked like during fix 2. Fixed by splitting `core/declarations.py`'s
+   `resolve_combinations` into `resolve_combinations_from_melds(all_melds, rules, leader_seat)`
+   (the reusable comparison/scoring half) and a thin wrapper that detects-then-delegates for
+   callers that don't already have melds on hand; `_contract_progress_block` now flattens
+   `info.melds_by_seat` directly into `resolve_combinations_from_melds`, and the now-dead
+   `_shown_cards_by_seat` helper was removed. Verified via `test_declarations.py` and
+   `test_deal_fixtures.py` (35 tests) before wiring it into `obs.py`, then via `test_env_obs.py` and
+   `test_env_infoset.py` after.
+
+**Measured progression: 104 -> 204 -> 259 deals/s** (fix 1+2 together, then fix 3), a 2.5x
+improvement overall, engine-only holding steady at ~5,300 deals/s throughout (confirming these were
+`env/`-layer costs, not `core/` regressions). Re-profiling after fix 3 shows no single remaining
+dominant cost — time is now spread fairly evenly across `encode()`'s ~20 observation blocks
+(`_bid_recent_block`, `_melds_public_block`, `_bid_summary_block`, etc., each allocating and
+filling its own small `np.zeros` array) and `legal_mask`, which is what "the encoder inherently
+does 20 small things per decision" looks like in a profile, not a bug to fix.
+
+**Honest recommendation, per this milestone's own written bar ("if your compute budget is modest,
+stop here"): stop here for now.** 259 deals/s at ~39.4 decisions/deal (measured directly, not
+estimated) is ~10,200 environment steps/second single-core — a reasonable number for CPU-only
+self-play, and one more core or more away from being much better via ordinary multiprocessing.
+Building `env/vec.py` (batched multi-process stepping) or porting `core/` to Rust now, before M7's
+actual training loop exists to say whether encoding throughput is even the bottleneck (PPO's
+network forward/backward cost, batch size, and GPU availability all factor into wall-clock training
+time too), would be optimizing blind. Both remain explicitly available next steps — flagged here,
+not started — if M7 turns out compute-bound on environment throughput specifically.
+
+Full project suite passes; `ruff check`/`ruff format --check` and `mypy --strict` are clean on
+every changed file (`env/actions.py`, `env/tracked_deal.py`, `env/infoset.py`, `env/obs.py`,
+`core/declarations.py`, plus the new `cli/bench_throughput.py`).
+
 ---
 
 ## M7 — First learning run (1–2 weeks)

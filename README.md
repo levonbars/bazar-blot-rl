@@ -92,7 +92,7 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0 through M5 complete.**
+**M0 through M6 complete.**
 
 The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
 and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
@@ -226,8 +226,24 @@ M4's heuristic bidder (it only competes against an overbidding opponent on infla
 estimates, and reliably fails those) — left unfixed here on purpose, since fixing agent quality is
 a different task than building the tool that found the issue.
 
-Next: **M6** (throughput, gated on measurement) or **M7** (the first learning run) — M5's harness
-is the thing both were waiting on.
+**M6** profiled the environment layer (`cli/bench_throughput.py`) rather than guessing where the
+time goes, and found three real inefficiencies in `env/` — none in `core/`, which held steady at
+~5,300 deals/s throughout: `legal_mask`'s auction branch exhaustively enumerating `is_legal` once
+per `(level, contract_type, capot)` when contract type never actually affects bid legality; meld
+detection re-run from scratch on every decision instead of once per deal
+(`TrackedDeal.melds_cache`); and `env/obs.py`'s contract-progress block re-detecting melds a
+second time even after the first fix, by flattening the already-cached melds back into hands just
+to re-detect them — the actual dominant cost once isolated, not the smaller item it looked like
+mid-fix. Full "engine+encode" throughput (`InfoSet` + `legal_mask` + full `encode()`/`flatten()`
+per decision, what a real self-play loop actually pays) went **104 → 259 deals/s**, ~10,200
+environment steps/second single-core at the measured ~39.4 decisions/deal. Per the roadmap's own
+bar, that's judged good enough to start M7 on rather than build `env/vec.py` or a Rust port blind,
+before training itself says whether encoding throughput is actually the bottleneck — both remain
+explicitly available next steps if it turns out to be. Full account, including the profiling
+methodology and the false-lead in diagnosing fix 3, in
+[`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M6.
+
+Next: **M7**, the first learning run.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

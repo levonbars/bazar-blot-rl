@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from bazarblot.core.auction import AuctionAction
 from bazarblot.core.deal import Action, Deal, Phase
+from bazarblot.core.declarations import Meld
 from bazarblot.core.play import PlayCardAction
 
 
@@ -29,6 +30,16 @@ class AuctionEvent:
 class TrackedDeal:
     deal: Deal
     auction_log: list[AuctionEvent] = field(default_factory=list)
+    melds_cache: tuple[tuple[Meld, ...], ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Memoizes `env/infoset.py::info_set()`'s per-seat meld detection — `detect_all_melds` is
+    a pure function of `deal.original_hands` and `deal.contract.contract_type`, both fixed for
+    the entire PLAY phase once the auction closes, so recomputing it on every single decision (as
+    `info_set()` used to) was pure waste — a profiling pass (M6) found it was the single largest
+    cost in a full self-play step, ~45% of `encode()`+`legal_mask()`'s combined time. Populated
+    lazily by `info_set()` the first time it's needed for this deal, not eagerly here — `Deal`
+    doesn't know its own contract yet at `TrackedDeal.__init__` time (the auction hasn't run)."""
 
     def step(self, action: Action) -> None:
         if self.deal.phase == Phase.AUCTION and not isinstance(action, PlayCardAction):

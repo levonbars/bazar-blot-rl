@@ -36,7 +36,7 @@ import numpy.typing as npt
 
 from bazarblot.core.auction import BidAction, ContraAction, PassAction, RecontraAction
 from bazarblot.core.cards import N_CARDS, RANKS, SUITS, TEAM_OF, ContractType, card_id, suit_of
-from bazarblot.core.declarations import Meld, detect_hand_melds, resolve_combinations
+from bazarblot.core.declarations import Meld, detect_hand_melds, resolve_combinations_from_melds
 from bazarblot.core.play import current_winner
 from bazarblot.core.scoring import round10
 from bazarblot.env.infoset import InfoSet
@@ -213,7 +213,16 @@ def _bid_payout_block(
     return np.array([m * level / 32], dtype=np.float32)
 
 
-def _own_melds(info: InfoSet, contract_type: ContractType) -> list[Meld]:
+def _own_melds(info: InfoSet, contract_type: ContractType) -> tuple[Meld, ...] | list[Meld]:
+    # `info.melds_by_seat` (once populated — PLAY/TERMINAL only) is always detected against the
+    # FINAL fixed `info.contract.contract_type`, which is exactly what `_effective_contract`
+    # returns once a contract exists — so it's always safe to reuse rather than re-detecting the
+    # same melds from `info.original_hand` a second time. During AUCTION, `melds_by_seat` is
+    # still `None` (nothing to reuse — no contract exists yet), so this falls back to detecting
+    # fresh. Found via profiling (M6): `detect_hand_melds`/`detect_all_melds` were among the
+    # hottest paths in `encode()`, largely from being called twice per decision for no reason.
+    if info.melds_by_seat is not None and contract_type == info.contract.contract_type:  # type: ignore[union-attr]
+        return info.melds_by_seat[info.seat]
     return detect_hand_melds(info.original_hand, info.seat, contract_type, info.rules)
 
 
@@ -379,21 +388,6 @@ def _running_points_block(info: InfoSet) -> Array:
     )
 
 
-def _shown_cards_by_seat(info: InfoSet) -> tuple[frozenset[int], ...]:
-    """`resolve_combinations` only needs a hand-like iterable of the cards each seat showed —
-    `info.melds_by_seat` (each seat's already-detected melds) already carries exactly that, so
-    this just flattens each seat's meld cards back into one frozenset per seat rather than
-    re-deriving anything from ground truth."""
-    assert info.melds_by_seat is not None
-    out = []
-    for seat_melds in info.melds_by_seat:
-        cards: set[int] = set()
-        for m in seat_melds:
-            cards |= set(m.cards)
-        out.append(frozenset(cards))
-    return tuple(out)
-
-
 def _contract_progress_block(info: InfoSet) -> Array:
     out = np.zeros(BLOCK_SHAPES["contract_progress"], dtype=np.float32)
     if info.contract is None or info.tables is None:
@@ -410,9 +404,12 @@ def _contract_progress_block(info: InfoSet) -> Array:
         # has completed yet (both are the same seat in practice: the trick-1 leader never
         # changes mid-deal).
         leader_seat = info.tricks[0][0][0] if info.tricks else (info.trick_leader or 0)
-        combo = resolve_combinations(
-            _shown_cards_by_seat(info), info.contract.contract_type, info.rules, leader_seat
-        )
+        # `info.melds_by_seat` is already the detected melds (cached per-deal by `info_set()` —
+        # see `TrackedDeal.melds_cache`), so go straight to the comparison/scoring half instead
+        # of flattening back into hands and re-detecting via `resolve_combinations` (M6: this
+        # re-detection was the single largest remaining cost in a full self-play step).
+        all_melds = [m for seat_melds in info.melds_by_seat for m in seat_melds]
+        combo = resolve_combinations_from_melds(all_melds, info.rules, leader_seat)
         combo_a = combo.team_points[attacking_team]
 
     total_scaled_a = round10(raw_a, info.rules) + combo_a

@@ -107,8 +107,15 @@ def info_set(
         # Auto-show means genuinely full disclosure from the start of play, not just at scoring
         # (Deal itself only computes this lazily at _finish_play, for scoring purposes) — so
         # info_set exposes it for every play-phase InfoSet, seat 0's view identical to seat 3's.
-        all_melds = detect_all_melds(deal.original_hands, deal.contract.contract_type, rules)
-        melds_by_seat = tuple(tuple(m for m in all_melds if m.owner_seat == s) for s in range(4))
+        # Cached on `tracked` (see `TrackedDeal.melds_cache`'s docstring): both inputs
+        # (`original_hands`, `contract.contract_type`) are fixed for the whole PLAY phase, so
+        # this only needs computing once per deal, not once per decision.
+        if tracked.melds_cache is None:
+            all_melds = detect_all_melds(deal.original_hands, deal.contract.contract_type, rules)
+            tracked.melds_cache = tuple(
+                tuple(m for m in all_melds if m.owner_seat == s) for s in range(4)
+            )
+        melds_by_seat = tracked.melds_cache
 
     return InfoSet(
         seat=seat,

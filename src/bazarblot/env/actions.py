@@ -147,7 +147,18 @@ def legal_mask(info: InfoSet, space: ActionSpace) -> BoolArray:
     compute, and the agent would learn to read the difference as a side channel. Delegates
     legality to `core.auction.is_legal` / `core.play.legal_moves` rather than re-deriving the
     rules here — the same "don't re-implement, reuse the tested engine" discipline as
-    `solver/dd.py`."""
+    `solver/dd.py`.
+
+    **The auction branch checks `is_legal` once per `(level, capot)`, not once per `(level,
+    type, capot)`** — `core.auction.is_legal`'s `BidAction` branch only ever rejects a
+    `contract_type` that isn't in `rules.contracts.types` (see its source), which every type in
+    `space.contract_types` trivially satisfies by construction (`build_action_space` derives it
+    from that same list). So contract type never actually affects the legality of a bid at a
+    given `(level, capot)`, only the level/capot themselves relative to the standing bid — a
+    profiling pass (M6) found this exhaustive per-type enumeration was `legal_mask`'s single
+    largest cost (~1.6M `is_legal` calls across a throughput benchmark), a straightforward 5x
+    reduction (÷`len(contract_types)`) with no behavior change, verified by
+    `test_legal_mask_matches_core_legality_on_random_deals` continuing to pass unchanged."""
     mask = np.zeros(space.action_dim, dtype=bool)
 
     if info.phase == Phase.AUCTION:
@@ -158,14 +169,13 @@ def legal_mask(info: InfoSet, space: ActionSpace) -> BoolArray:
             (RecontraAction(), RECONTRA_IDX),
         ):
             mask[idx] = is_legal(info.auction_state, auction_action, info.rules)
+        capot_options = (False, True) if space.capot_states == 2 else (False,)
         for level in range(space.min_bid, space.max_bid + 1):
-            for contract_type in space.contract_types:
-                capot_options = (False, True) if space.capot_states == 2 else (False,)
-                for capot in capot_options:
-                    bid = BidAction(level=level, contract_type=contract_type, capot=capot)
-                    mask[space.bid_index(level, contract_type, capot)] = is_legal(
-                        info.auction_state, bid, info.rules
-                    )
+            for capot in capot_options:
+                probe = BidAction(level=level, contract_type=space.contract_types[0], capot=capot)
+                if is_legal(info.auction_state, probe, info.rules):
+                    for contract_type in space.contract_types:
+                        mask[space.bid_index(level, contract_type, capot)] = True
         return mask
 
     if info.phase == Phase.PLAY:

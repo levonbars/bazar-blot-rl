@@ -218,21 +218,22 @@ def beats(a: Meld, b: Meld, rules: RuleConfig, leader_seat: int) -> bool:
     return _more_elder(a.owner_seat, b.owner_seat, leader_seat)
 
 
-def resolve_combinations(
-    hands: tuple[frozenset[int], ...],
-    contract_type: ContractType,
-    rules: RuleConfig,
-    leader_seat: int,
+def resolve_combinations_from_melds(
+    all_melds: list[Meld], rules: RuleConfig, leader_seat: int
 ) -> CombinationResult:
-    """Cross-team comparison over every meld in `hands`.
+    """The comparison/scoring half of `resolve_combinations`, taking already-detected melds
+    directly rather than re-running `detect_all_melds` on a set of hands.
 
-    `hands` should be the melds actually *shown* — under M1 staging that is simply the dealt
-    hands (auto-show), per this module's docstring.
+    Split out (M6) because a caller that already has melds on hand — `env/obs.py`, via
+    `InfoSet.melds_by_seat`, which `env/infoset.py` caches for the whole play phase precisely to
+    avoid re-detecting them — has no reason to pay for `detect_all_melds` a second time. Before
+    this split, `resolve_combinations` always re-detected internally, and calling it once per
+    decision (as `env/obs.py`'s `contract_progress` block did) was a measured, meaningful
+    fraction of a full self-play step's cost.
 
     Blot-Reblot is excluded from the comparison pool entirely and credited unconditionally to
     its holder's team (§6.2, §6.4) — it neither wins nor is suppressed by the comparison.
     """
-    all_melds = detect_all_melds(hands, contract_type, rules)
     comparable = [m for m in all_melds if m.kind != "blot_reblot"]
     blot_reblots = [m for m in all_melds if m.kind == "blot_reblot"]
 
@@ -265,3 +266,20 @@ def resolve_combinations(
         team_points=(team_points[0], team_points[1]),
         melds_by_seat=melds_by_seat,
     )
+
+
+def resolve_combinations(
+    hands: tuple[frozenset[int], ...],
+    contract_type: ContractType,
+    rules: RuleConfig,
+    leader_seat: int,
+) -> CombinationResult:
+    """Cross-team comparison over every meld in `hands`.
+
+    `hands` should be the melds actually *shown* — under M1 staging that is simply the dealt
+    hands (auto-show), per this module's docstring.
+
+    A thin wrapper around `resolve_combinations_from_melds` (see its docstring for why the split
+    exists) — this function's own behavior and signature are unchanged."""
+    all_melds = detect_all_melds(hands, contract_type, rules)
+    return resolve_combinations_from_melds(all_melds, rules, leader_seat)
