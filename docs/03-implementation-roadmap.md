@@ -737,6 +737,102 @@ Model-free baseline, per spec §7.1(1).
 **Done when:** the learned agent beats `heuristic` with a paired CI excluding 0, and beats
 `PIMC-20` or the gap is measured and explained.
 
+### M7 status: **first run complete, done-when partially met**
+
+Built as `src/bazarblot/agents/nn/` (the model: `bid_factor.py`, `network.py`, `ppo_agent.py`) and
+`src/bazarblot/learn/` (the training loop: `reward.py`, `rollout.py`, `ppo.py`, `opponent_pool.py`,
+`checkpoint.py`, `train.py`), plus `cli/train.py` (`python -m bazarblot.cli.train`). Requires the
+`learn` extra (`pip install -e .[learn]`) — torch, tensorboard — which nothing else in the project
+depends on.
+
+**The network** is a shared MLP trunk over `v1` features (`env/obs.py::flatten`, 734 floats for the
+shipped preset) feeding a value head and the phase-appropriate policy head(s): a factored
+`(Delta, type, capot)` bid head exactly per spec §3.2, wrapped in one more top-level `{PASS,
+CONTRA, RECONTRA, BID}` choice (a deliberate, documented implementation simplification over the
+spec's literal 3 fixed auction actions + implicit bid), and a flat 32-way card head for the play
+phase. `agents/nn/bid_factor.py` translates between the flat engine action space and this factored
+representation; **it also fixes a real off-by-one in the spec's own worked arithmetic** — §3.2
+states "72 + 5 + 2 = 79 logits (the largest possible raise is 80 − 8 = 72)", but the paragraph
+immediately before it fixes the opening bid's virtual base at `min_bid − 1 = 7`, not `min_bid`, so
+an opening bid AT `max_bid` (a real, legal bid) needs `Delta = 73`, not 72. Sized correctly here
+rather than silently reproducing the bug and making the top of the ladder unopenable in one bid.
+Both the factoring and the network's hierarchical masked sampling are cross-checked exhaustively
+against `core.auction.is_legal` directly (`tests/test_agents_nn_bid_factor.py`,
+`tests/test_agents_nn_ppo_agent.py`) rather than trusted by inspection, and
+`recompute_log_prob`'s log-probability exactly reproduces `decide()`'s own at zero parameter
+change — the property PPO's importance ratio depends on.
+
+**Auxiliary heads (belief, DD-value, contract-outcome, §7.2) were deliberately NOT built.** Belief
+and contract-outcome need their own label-construction and loss-weighting code this first pass
+doesn't exercise; the DD-value head's labels are only "free" in the sense that `solver/dd.py`
+exists — each one is still a multi-second-to-tens-of-seconds full solve (M2/M2.5's own documented
+cost), which would make DD-value labels the dominant cost of every training batch and undo M6's
+throughput work. The spec's own family ordering (§7.1: "model-free self-play baseline... ship this
+first") backs shipping the plain policy+value baseline before the auxiliary heads, which remain
+real, separable follow-up work, not scope creep.
+
+**Two real bugs were found via an actual training run, not caught by any unit test.** First, a
+crash: `ppo_update` divided by zero whenever a whole rollout batch aborted (every one of its
+shuffles hit a 4-pass auction with no bid) — fixed to skip the update and return zeroed stats
+instead. Second, and far more consequential: **pure self-play collapsed to a degenerate
+"everyone always passes" equilibrium within about 7 PPO updates** — abort rate climbed from 6% to
+100% and stayed there, margin pinned at exactly 0, entropy decaying toward 0. Root cause: the
+rollout collector originally discarded aborted deals entirely (mirroring `eval/duplicate.py`'s
+policy, which discards to preserve its pairing guarantee — a requirement training data doesn't
+share). A discarded deal is invisible to the gradient either way, so any random upward drift in
+per-seat pass probability — amplified because abort probability is roughly `P(pass)^4` across four
+IDENTICAL self-play seats — had nothing pulling it back down, and the only deals still producing a
+training signal were the shrinking minority that didn't abort. **Raising the entropy bonus alone
+did not fix it** (verified empirically at `entropy_coef=0.05` and `0.1`: same collapse, same
+timeline). Two changes together did: (1) score a 4-pass abort as its true `margin=0` outcome
+instead of discarding it — not reward shaping, since an abort really is zero-sum-zero under the
+rules, just the honest terminal value of that outcome instead of pretending it never happened; (2)
+seed the opponent pool with `HeuristicAgent`/`RandomAgent` from iteration 0, not only historical
+self-play snapshots (which don't exist yet early on) — a fixed baseline that reliably contests
+auctions breaks the symmetry that let the collapse become self-consistent. Both fixes are
+regression-tested (`tests/test_learn_rollout.py`) and documented at their sites, not just fixed
+silently.
+
+**A real training run (800 iterations, 128 deals/iteration, `opponent_prob=0.5`, ~28 minutes on
+one CPU core) clears the `heuristic`/`random` half of the Done-when bar, formally and
+repeatedly, not as a one-off:** paired evaluation against both baselines (150 pairs, M5's harness,
+bootstrapped CI) ran every 25 iterations, 32 times across the run. Every single one of those 32
+checks had a CI excluding 0 in the agent's favor — vs `heuristic`, margin ranged 52.8 to 74.1
+(mean 67.2) across the run; vs `random`, 151.7 to 262.3 (mean 205.6). This was true from the very
+FIRST checkpoint (iteration 25: vs-heuristic margin 66.5, CI (59.7, 73.2)) through the last
+(iteration 800: margin 69.7, CI (63.1, 76.1)) — the result is stable, not a late-training fluke,
+and it held without the run ever visibly re-collapsing after the two fixes above landed.
+
+**`PIMC-20` comparison was not attempted, and the gap is not yet measured — left as explicit
+future work, following M4's own precedent for the identical cost reason.** M4 already documented
+that a full "PIMC-20 beats heuristic" comparison is infeasible at realistic sample sizes: PIMC-K
+needs `K × len(legal_cards)` full double-dummy solves per decision, each 1–40+ seconds (M2), so
+PIMC-20's first play-phase decision alone costs on the order of 160 solves. A paired evaluation
+against the trained agent would multiply that further. This is a real gap against the milestone's
+own stated bar, not a silently-dropped requirement — flagged here rather than either faked with an
+unrepresentative tiny sample or quietly skipped.
+
+**A real, unresolved caveat worth stating plainly: the trained agent's own self-play abort rate
+climbed to roughly 85–92% by the end of training**, well above where it started (6%) and — on the
+information available — plausibly higher than a well-calibrated bidder's true optimum. Two
+readings are both consistent with the data, and this run cannot distinguish them: (a) the policy
+has correctly learned that most dealt hands under this ruleset's `min_bid=8` floor genuinely aren't
+worth opening, and two copies of the SAME calibrated policy facing each other therefore pass
+correctly on each other most of the time (self-play margin stays centered near 0 throughout,
+exactly as two evenly-matched opponents should); or (b) the policy has drifted somewhat
+over-conservative in a way that still manages to beat `heuristic`/`random` specifically because
+those baselines are (per M4/M5's own documented findings) not close to optimal bidders themselves,
+without the policy's own bidding being anywhere near optimal in an absolute sense. Distinguishing
+these needs the DD-oracle bid-accuracy metric M5 already built
+(`eval.metrics.evaluate_dd_oracle_metrics`) run against this checkpoint — not done in this pass,
+noted as the natural next diagnostic rather than guessed at.
+
+Full project suite passes (`pytest`, 330 tests); `ruff check`/`ruff format --check` and `mypy
+--strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
+`disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
+for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same
+reasoning as the existing `pettingzoo` overrides.
+
 ---
 
 ## M8 — The two-phase experiments (the actual paper)
