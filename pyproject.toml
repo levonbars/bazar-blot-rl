@@ -89,6 +89,16 @@ ignore_missing_imports = true
 module = "bazarblot.env.aec"
 disallow_subclassing_any = false
 
+# torch ships incomplete stubs for torch.distributions (Categorical.sample/log_prob/entropy) and
+# Tensor.backward — real methods on a real, well-typed library, just not annotated in the stub
+# package strict mode can see. `disallow_untyped_calls` would otherwise reject calling them at
+# every single use site in the M7 training code; relaxed here rather than sprinkling
+# `# type: ignore[no-untyped-call]` over ~25 call sites for a gap that is torch's, not this
+# module's.
+[[tool.mypy.overrides]]
+module = ["bazarblot.agents.nn.*", "bazarblot.learn.*"]
+disallow_untyped_calls = false
+
 [tool.coverage.run]
 source = ["src/bazarblot"]
 
