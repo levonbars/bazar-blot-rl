@@ -21,7 +21,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - run: pip install -e ".[dev,ui]"
+      # CPU-only torch first: the default Linux wheel bundles CUDA (multi-GB) and CI has no GPU.
+      # Installing it before the project means `.[learn]`'s `torch>=2.2` is already satisfied
+      # and pip won't pull the CUDA build over it.
+      - name: Install torch (CPU wheel)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # `env` (numpy, pettingzoo, gymnasium) and `learn` (torch, tensorboard) are needed by
+      # mypy and the test suite, not just at runtime -- `.[dev,ui]` alone leaves every
+      # `bazarblot.env`/`agents.nn`/`learn` import unresolvable.
+      - run: pip install -e ".[dev,ui,env,learn]"
 
       - name: Lint
         run: ruff check .
