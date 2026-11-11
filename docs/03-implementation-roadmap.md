@@ -1052,15 +1052,57 @@ an action it essentially never tries. Doubling an opponent's failing bid is the 
 over-bidding (and doubling also multiplies the stakes of a failure), so it is the obvious missing
 tool: the agent can currently only respond to an over-bid by out-bidding it or conceding.
 
-**Next:** (3c) give the agent a way to discover doubling: exploration of the contra/recontra
-actions when legal during rollouts (log-probabilities still scored under the network's own
-distribution, like the forced-bid mechanism), or a teacher that doubles by a simple rule, then
-re-run the held-out profile. (4) Scale up (parallel rollouts, millions of deals) once the
-profile is healthy. (5) Measure signaling: how much better the belief head predicts partner's cards
-after the auction, and whether changing partner's bid for the same cards changes the card played.
-(6) Stronger play (solver teacher for endgames) and the search-based baseline.
+**Step 3c result (negative): exploring doubling did not teach it, and it cost robustness.** Same run
+as 3b, plus `forced_contra_prob`: whenever doubling (contra, or recontra in the reply window) was
+legal for a learner seat, take it with probability 0.15 falling to 0.03 over the run (scored under
+the network's own distribution like the forced bid; forced actions are flagged on `Decision` and
+left out of the KL estimate that stops an update, since a few nats of change on a 1e-4-probability
+action would otherwise stop every update). About 19,000 doubles were forced in 241,000 chances.
 
-Full project suite passes (`pytest`, 377 tests); `ruff check`/`ruff format --check` and `mypy
+- The policy never adopted it: 16 doubles it chose itself in the whole run (0 in the first 150
+  iterations), and the evaluation `contra_rate` was 0.00 at all 12 checkpoints.
+- The held-out profile got worse than 3b at every opponent style (fresh seeds, 300 pairs; 3b in
+  brackets): -6 +6.8 (+8.2), -3 +6.1 (+7.4), -1 +3.9 (+6.1), 0 +3.2 (+5.4), +2 -0.3 (+2.7), +4
+  +0.8 (+5.4), +8 +10.7 (+20.2), +12 +16.7 (+29.2). Self-play: contracts made 0.59 (3b: 0.69),
+  declaring worth +2.9 (3b: +7.8). The forced doubles are mostly losing bets (most contracts are
+  made) and they end auctions early and double the stakes, which probably made the training data
+  noisier and unlike deployment; that is a reading, not something I tested.
+
+**But doubling is worth a lot: a hand-written rule shows it.** `agents/doubling.py::RuleDoubler`
+wraps an agent and doubles when the other side "can't reach their number": it estimates what my
+side makes in the bidder's contract with the heuristic's own hand estimator, leaving the bidder
+`16 - mine` scaled points, and doubles if that plus `slack` levels of doubt is still below the bid.
+Added to the 3b agent (`python -m bazarblot.cli.doubling_probe`, fresh seeds, 300 pairs, margin
+over heuristics at four bid offsets):
+
+| agent | vs 0 | vs +4 | vs +8 | vs +12 |
+|---|---|---|---|---|
+| 3b as trained (never doubles) | +5.4 | +5.4 | +20.2 | +29.2 |
+| + rule, slack 0 | +2.3 | +7.1 | +38.2 | +51.1 |
+| + rule, slack 3 | +3.8 | +3.9 | +37.2 | +51.1 |
+| + rule, slack 6 | +4.3 | +5.0 | +29.1 | +50.9 |
+
+Doubling adds +9 to +22 points against over-bidders; against normal bidders an undiscriminating
+rule costs 1 to 3 points (slack 6 costs about 1 at offset 0 and 0.4 at +4 while doubling only 16%
+of the time against +8). So the action is valuable and the shortfall is in how the agent learns,
+not in the action. One candidate cause, UNTESTED: the reward is `tanh(margin / 24)`, which
+saturates for the large margins that a doubled failure produces (a margin of 40 and of 70 differ
+by 0.06 in reward), so a concave reward makes the large-stakes decisions look less attractive than
+they are. The training pool also only goes up to offset +6, where doubling gains least.
+
+**Decision needed (not yet taken):** (a) bootstrap doubling from the rule: clone `RuleDoubler`
+(slack ~3-6) as the teacher for doubling states, then let PPO refine, gated on the held-out
+profile; fast and reliable, but hand-written knowledge goes in; (b) test the reward-saturation
+explanation with a less saturating reward and keep exploration, to let the agent find doubling on
+its own; slower and uncertain; (c) leave doubling and move to scaling up and signaling. The
+exploration option stays in the code but off by default.
+
+**After that:** (4) scale up (parallel rollouts, millions of deals) once the profile is healthy;
+(5) measure signaling: how much better the belief head predicts partner's cards after the
+auction, and whether changing partner's bid for the same cards changes the card played; (6)
+stronger play (solver teacher for endgames) and the search-based baseline.
+
+Full project suite passes (`pytest`, 384 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

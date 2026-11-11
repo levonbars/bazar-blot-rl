@@ -17,6 +17,7 @@ from bazarblot.learn.train import (  # noqa: E402
     TrainConfig,
     _entropy_coef_at,
     _forced_bid_prob_at,
+    _forced_contra_prob_at,
     train,
 )
 
@@ -218,3 +219,32 @@ def test_train_with_style_pool_and_heldout_profile_saves_best_checkpoint(tmp_pat
     )
     train(config, rules=RULES)
     assert (tmp_path / "checkpoints" / "best_profile.pt").exists()
+
+
+def test_forced_contra_prob_anneals_linearly() -> None:
+    config = TrainConfig(
+        n_iterations=101, forced_contra_prob_start=0.2, forced_contra_prob_end=0.04
+    )
+    assert _forced_contra_prob_at(0, config) == pytest.approx(0.2)
+    assert _forced_contra_prob_at(100, config) == pytest.approx(0.04)
+    assert _forced_contra_prob_at(50, config) == pytest.approx(0.12)
+
+
+def test_train_with_doubling_exploration_runs(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    config = TrainConfig(
+        n_iterations=3,
+        n_deals_per_iter=8,
+        ppo=PPOConfig(epochs=1, minibatch_size=32),
+        central_critic=True,
+        forced_contra_prob_start=0.5,
+        forced_contra_prob_end=0.1,
+        baseline_opponents=("heuristic@3", "passer"),
+        opponent_prob=0.5,
+        snapshot_every=10,
+        eval_every=2,
+        eval_n_pairs=3,
+        checkpoint_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    train(config, rules=RULES)
+    assert (tmp_path / "checkpoints" / "final.pt").exists()

@@ -126,6 +126,7 @@ def _play_one(
     seat_actors: dict[int, Opponent],
     forced_bid_prob: float = 0.0,
     bid_agent: Agent | None = None,
+    forced_contra_prob: float = 0.0,
 ) -> tuple[dict[int, list[Transition]], float, bool, int | None]:
     """Play one deal; `seat_actors[seat]` decides seat `seat`'s actions -- either `learner`
     itself, a frozen `PolicyValueNet` snapshot from the opponent pool, or an arbitrary `Agent`
@@ -173,7 +174,13 @@ def _play_one(
             action_idx = bid_agent.act(info, space, mask)
         elif actor is learner:
             decision = decide(
-                learner, info, space, mask, sample=True, forced_bid_prob=forced_bid_prob
+                learner,
+                info,
+                space,
+                mask,
+                sample=True,
+                forced_bid_prob=forced_bid_prob,
+                forced_contra_prob=forced_contra_prob,
             )
             transitions[seat].append(
                 Transition(
@@ -209,6 +216,7 @@ def collect_rollout(
     forced_bid_prob: float = 0.0,
     bid_agent: Agent | None = None,
     critic: CentralCritic | None = None,
+    forced_contra_prob: float = 0.0,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
 
@@ -222,8 +230,10 @@ def collect_rollout(
     says is legal and without corrupting the recorded log-probabilities PPO's update depends on.
     Zero by default (no effect); `learn/train.py` anneals it down over a training run.
 
+    `forced_contra_prob` does the same for doubling (contra/recontra) when it is legal.
+
     `bid_agent` (see `_play_one`) takes over all auction decisions so the learner trains on card
-    play alone; `forced_bid_prob` is then moot.
+    play alone; the forced-exploration probabilities are then moot.
 
     Each shuffle is either pure self-play (all four seats `learner`) or, with probability
     `opponent_prob` when `opponent_pool` is non-empty, `learner` at two seats against one
@@ -277,6 +287,7 @@ def collect_rollout(
                 seat_actors,
                 forced_bid_prob,
                 bid_agent,
+                forced_contra_prob,
             )
             stats.n_deals += 1
             if aborted:

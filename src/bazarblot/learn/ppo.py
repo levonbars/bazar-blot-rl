@@ -174,7 +174,15 @@ def ppo_update(
             batch_old_log_probs = torch.from_numpy(old_log_probs[idx])
 
             with torch.no_grad():
-                approx_kl = (batch_old_log_probs - new_log_probs).mean().item()
+                # The drift of the policy is measured on actions it actually sampled. A forced
+                # exploratory action can be extremely unlikely under the policy (a double it
+                # gives probability 1e-4), so a few nats of change on a handful of them would
+                # swamp the mean and stop the update for no real reason.
+                natural = torch.from_numpy(
+                    np.array([not transitions[i].decision.forced for i in idx], dtype=bool)
+                )
+                log_ratio = batch_old_log_probs - new_log_probs
+                approx_kl = (log_ratio[natural] if bool(natural.any()) else log_ratio).mean().item()
             if config.target_kl is not None and approx_kl > config.target_kl:
                 # The policy has already drifted too far from the rollout-time policy (from
                 # earlier minibatches/epochs on this same batch) -- stop taking further gradient

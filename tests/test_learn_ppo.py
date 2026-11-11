@@ -175,3 +175,35 @@ def test_value_only_update_leaves_policy_head_untouched() -> None:
     for key in before:
         changed = not torch.equal(before[key], after[key])
         assert changed == key.startswith("value_head"), key
+
+
+def test_kl_stop_ignores_forced_exploratory_actions() -> None:
+    """A forced action can be extremely unlikely under the policy, so a large change in its
+    log-probability must not trip `target_kl` (it would stop every update for no real reason).
+    Same data, same large perturbation: flagged as forced it is ignored; unflagged it stops the
+    update before the first gradient step."""
+    from dataclasses import replace
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    transitions, _ = collect_rollout(RULES, SPACE, net, n_deals=20, seed=0, forced_contra_prob=1.0)
+    forced = [t for t in transitions if t.decision.forced]
+    assert len(forced) >= 5
+
+    def perturbed(flag: bool) -> list:
+        out = []
+        for t in transitions:
+            if t.decision.forced:
+                t = replace(
+                    t, decision=replace(t.decision, log_prob=t.decision.log_prob + 8.0, forced=flag)
+                )
+            out.append(t)
+        return out
+
+    config = PPOConfig(epochs=1, minibatch_size=len(transitions), target_kl=0.03)
+    optimizer = torch.optim.Adam(net.parameters(), lr=1e-4)
+    ignored = ppo_update(net, SPACE, perturbed(True), optimizer, config)
+    assert ignored.value_loss > 0.0  # updated normally
+
+    counted = ppo_update(net, SPACE, perturbed(False), optimizer, config)
+    assert counted.value_loss == 0.0 and counted.policy_loss == 0.0  # stopped immediately

@@ -11,15 +11,23 @@ actually did, over the same shuffles with the agent on each team in turn:
 - `made_rate`: of the contracts the agent's team declared, how many were made. A bidder that
   overbids shows up here immediately (the original heuristic made 11%).
 - `selfplay_contract_rate`: contract rate when the agent plays all four seats.
+- `contra_rate`: of the auction decisions where the agent COULD double (contra, or recontra in the
+  reply window), the share on which it did. A policy cloned from a teacher that never doubles sits
+  at exactly 0, and stays there unless something teaches it the value of doubling.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+import numpy.typing as npt
+
 from bazarblot.agents.base import Agent
+from bazarblot.core.deal import Phase
 from bazarblot.core.rules import RuleConfig
-from bazarblot.env.actions import ActionSpace
+from bazarblot.env.actions import CONTRA_IDX, RECONTRA_IDX, ActionSpace
+from bazarblot.env.infoset import InfoSet
 from bazarblot.eval.duplicate import play_deal_once
 
 
@@ -30,6 +38,7 @@ class BehaviorReport:
     declare_rate: float | None
     made_rate: float | None
     selfplay_contract_rate: float
+    contra_rate: float | None = None
 
     def summary(self) -> str:
         def fmt(x: float | None) -> str:
@@ -38,8 +47,25 @@ class BehaviorReport:
         return (
             f"contract_rate={fmt(self.contract_rate)} declare_rate={fmt(self.declare_rate)} "
             f"made_rate={fmt(self.made_rate)} selfplay_contract_rate="
-            f"{fmt(self.selfplay_contract_rate)} (n={self.n_deals} shuffles x 2 seatings)"
+            f"{fmt(self.selfplay_contract_rate)} contra_rate={fmt(self.contra_rate)} "
+            f"(n={self.n_deals} shuffles x 2 seatings)"
         )
+
+
+class _DoublingCounter:
+    """Delegates to `agent` and counts its chances to double and the times it took them."""
+
+    def __init__(self, agent: Agent) -> None:
+        self.agent = agent
+        self.chances = 0
+        self.taken = 0
+
+    def act(self, info: InfoSet, space: ActionSpace, legal_mask: npt.NDArray[np.bool_]) -> int:
+        action = self.agent.act(info, space, legal_mask)
+        if info.phase == Phase.AUCTION and (legal_mask[CONTRA_IDX] or legal_mask[RECONTRA_IDX]):
+            self.chances += 1
+            self.taken += int(action in (CONTRA_IDX, RECONTRA_IDX))
+        return action
 
 
 def evaluate_behavior(
@@ -55,9 +81,10 @@ def evaluate_behavior(
     if len(seeds) != len(dealers):
         raise ValueError("seeds and dealers must be the same length")
     games = contracts = declared = made = selfplay_contracts = 0
+    counter = _DoublingCounter(agent)
     for seed, dealer in zip(seeds, dealers, strict=True):
         for agent_team in (0, 1):
-            seats = {s: (agent if s % 2 == agent_team else opponent) for s in range(4)}
+            seats = {s: (counter if s % 2 == agent_team else opponent) for s in range(4)}
             result = play_deal_once(rules, space, seed, 0, dealer, seats)
             games += 1
             if result is None:
@@ -74,4 +101,5 @@ def evaluate_behavior(
         declare_rate=declared / contracts if contracts else None,
         made_rate=made / declared if declared else None,
         selfplay_contract_rate=selfplay_contracts / max(1, len(seeds)),
+        contra_rate=counter.taken / counter.chances if counter.chances else None,
     )

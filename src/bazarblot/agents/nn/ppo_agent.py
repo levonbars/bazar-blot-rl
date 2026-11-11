@@ -61,6 +61,11 @@ class Decision:
     mask: BoolArray
     phase: Phase
     base_level: int
+    forced: bool = False
+    """True when exploration overrode the sampled auction action (forced bid or double). The
+    recorded `log_prob` is still the network's own probability of that action, but such an
+    action can be extremely unlikely under the policy, so `learn/ppo.py` keeps it out of the KL
+    estimate that decides when to stop updating."""
 
 
 def _auction_decision(
@@ -70,7 +75,8 @@ def _auction_decision(
     out: dict[str, Tensor],
     sample: bool,
     forced_bid_prob: float = 0.0,
-) -> tuple[int, Tensor]:
+    forced_contra_prob: float = 0.0,
+) -> tuple[int, Tensor, bool]:
     base = base_level(info)
     legality = bid_legality(mask, space, base)
 
@@ -86,7 +92,18 @@ def _auction_decision(
         and forced_bid_prob > 0.0
         and torch.rand(()) < forced_bid_prob
     )
-    if force_bid:
+    can_double = bool(meta_mask[META_CONTRA] or meta_mask[META_RECONTRA])
+    force_double = (
+        sample and can_double and forced_contra_prob > 0.0 and torch.rand(()) < forced_contra_prob
+    )
+    forced = bool(force_bid or force_double)
+    if force_double:
+        # Doubling (contra, or recontra in the reply window) is never tried by a policy cloned
+        # from a teacher that never doubles, and PPO cannot learn the value of an action it
+        # essentially never takes; so, like the forced bid, sometimes take it anyway while
+        # collecting data, and score it under the network's own distribution as always.
+        meta = torch.tensor(META_CONTRA if meta_mask[META_CONTRA] else META_RECONTRA)
+    elif force_bid:
         # Forced-exploration override (annealed by `learn/train.py` over the run): sample from a
         # BIASED behavior distribution during rollout collection only, but score the resulting
         # action under `meta_dist` -- the network's own TRUE (unbiased) distribution -- exactly
@@ -104,7 +121,7 @@ def _auction_decision(
 
     if int(meta.item()) != META_BID:
         action_idx = {META_PASS: PASS_IDX, META_CONTRA: 1, META_RECONTRA: 2}[int(meta.item())]
-        return action_idx, log_prob
+        return action_idx, log_prob, forced
 
     delta_mask = torch.from_numpy(legality.delta_mask)
     delta_dist = _masked_categorical(out["delta"][0, : delta_mask.shape[0]], delta_mask)
@@ -126,7 +143,7 @@ def _auction_decision(
     action_idx = flat_bid_index(
         space, base, int(delta_idx.item()) + 1, int(type_idx.item()), int(capot_idx.item())
     )
-    return action_idx, log_prob
+    return action_idx, log_prob, forced
 
 
 def _play_decision(
@@ -145,26 +162,28 @@ def decide(
     mask: BoolArray,
     sample: bool,
     forced_bid_prob: float = 0.0,
+    forced_contra_prob: float = 0.0,
 ) -> Decision:
     """One full decision: encode `info`, run the network, sample (or, if `sample=False`, take the
     greedy action) under the phase-appropriate hierarchical mask, and package everything
     `learn/rollout.py` needs to later recompute this same log-probability under updated
     parameters.
 
-    `forced_bid_prob` (rollout collection only, see `_auction_decision`'s docstring) biases
-    auction-phase sampling toward `BID` without affecting the recorded log-probability's
-    correctness."""
+    `forced_bid_prob` and `forced_contra_prob` (rollout collection only, see `_auction_decision`)
+    bias auction-phase sampling toward a bid or a double without affecting the recorded
+    log-probability's correctness; the returned `Decision.forced` says whether one fired."""
     obs_np = flatten(encode(info)).astype(np.float32)
     obs = torch.from_numpy(obs_np).unsqueeze(0)
     with torch.no_grad():
         out = net(obs)
         value = float(out["value"][0].item())
         if info.phase == Phase.AUCTION:
-            action_idx, log_prob_t = _auction_decision(
-                info, space, mask, out, sample, forced_bid_prob
+            action_idx, log_prob_t, forced = _auction_decision(
+                info, space, mask, out, sample, forced_bid_prob, forced_contra_prob
             )
         elif info.phase == Phase.PLAY:
             action_idx, log_prob_t = _play_decision(space, mask, out, sample)
+            forced = False
         else:
             raise ValueError(f"no decision to make in phase {info.phase}")
     return Decision(
@@ -175,6 +194,7 @@ def decide(
         mask=mask,
         phase=info.phase,
         base_level=base_level(info) if info.phase == Phase.AUCTION else 0,
+        forced=forced,
     )
 
 

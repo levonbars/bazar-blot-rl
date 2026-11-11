@@ -24,6 +24,7 @@ from bazarblot.agents.nn.network import CentralCritic, build_network
 from bazarblot.agents.nn.ppo_agent import NNAgent
 from bazarblot.agents.pass_bidder import PassBidder
 from bazarblot.agents.random_agent import RandomAgent
+from bazarblot.core.deal import Phase
 from bazarblot.core.rules import RuleConfig, load_default
 from bazarblot.env.actions import ActionSpace, build_action_space
 from bazarblot.eval.behavior import evaluate_behavior
@@ -48,6 +49,12 @@ class TrainConfig:
     forced_bid_prob_start: float = 0.4
     forced_bid_prob_end: float = 0.05
     forced_bid_anneal_frac: float = 1.0
+    forced_contra_prob_start: float = 0.0
+    forced_contra_prob_end: float = 0.0
+    """Exploration of doubling (contra/recontra) during rollouts, linearly annealed over the run:
+    each time doubling is legal for a learner seat, take it with this probability. A policy cloned
+    from a teacher that never doubles assigns it near-zero probability and PPO cannot learn its
+    value from actions it never takes (`docs/03-implementation-roadmap.md` M7)."""
     bid_agent: str | None = None
     """`"heuristic"` trains card play only, with `HeuristicAgent` making every auction decision for
     every seat (roadmap M7 stage 1); `None` is the original joint bid-and-play training. Evaluation
@@ -136,6 +143,16 @@ def _forced_bid_prob_at(iteration: int, config: TrainConfig) -> float:
     frac = iteration / anneal_iters
     return config.forced_bid_prob_start + frac * (
         config.forced_bid_prob_end - config.forced_bid_prob_start
+    )
+
+
+def _forced_contra_prob_at(iteration: int, config: TrainConfig) -> float:
+    """Linear anneal from `forced_contra_prob_start` to `forced_contra_prob_end` over the run."""
+    if config.n_iterations <= 1:
+        return config.forced_contra_prob_start
+    frac = iteration / (config.n_iterations - 1)
+    return config.forced_contra_prob_start + frac * (
+        config.forced_contra_prob_end - config.forced_contra_prob_start
     )
 
 
@@ -256,6 +273,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     best_score = float("-inf")
     for iteration in range(config.n_iterations):
         forced_bid_prob = _forced_bid_prob_at(iteration, config)
+        forced_contra_prob = _forced_contra_prob_at(iteration, config)
         t0 = time.perf_counter()
         transitions, stats = collect_rollout(
             rules,
@@ -270,6 +288,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             forced_bid_prob=forced_bid_prob,
             bid_agent=bid_agent,
             critic=critic,
+            forced_contra_prob=forced_contra_prob,
         )
         t_rollout = time.perf_counter() - t0
 
@@ -309,11 +328,22 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
         writer.add_scalar("time/rollout_s", t_rollout, iteration)
         writer.add_scalar("time/update_s", t_update, iteration)
 
+        double_chances = [
+            t
+            for t in transitions
+            if t.decision.phase == Phase.AUCTION and (t.decision.mask[1] or t.decision.mask[2])
+        ]
+        doubles = [t for t in double_chances if t.decision.action_idx in (1, 2)]
+        policy_doubles = sum(not t.decision.forced for t in doubles)
+        writer.add_scalar("rollout/policy_doubles", policy_doubles, iteration)
+        writer.add_scalar("rollout/forced_doubles", len(doubles) - policy_doubles, iteration)
+        writer.add_scalar("rollout/double_chances", len(double_chances), iteration)
         declare_str = f"{declare_rate:.2f}" if declare_rate is not None else "n/a"
         print(
             f"iter {iteration:5d}  margin={margin_mean:+7.2f}  abort_rate={abort_rate:.2f}  "
             f"declare_rate={declare_str}  ent_coef={entropy_coef:.3f}  "
-            f"fbid={forced_bid_prob:.2f}  "
+            f"fbid={forced_bid_prob:.2f}  fdbl={forced_contra_prob:.2f}  "
+            f"doubles={policy_doubles}+{len(doubles) - policy_doubles}f/{len(double_chances)}  "
             f"value_loss={update_stats.value_loss:.4f}  entropy={update_stats.entropy:.3f}  "
             f"kl={update_stats.approx_kl:+.4f}  clip={update_stats.clip_fraction:.3f}  "
             f"belief_acc={update_stats.belief_acc:.3f}  "
@@ -369,6 +399,8 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                 writer.add_scalar("behavior/declare_rate", behavior.declare_rate, iteration)
             if behavior.made_rate is not None:
                 writer.add_scalar("behavior/made_rate", behavior.made_rate, iteration)
+            if behavior.contra_rate is not None:
+                writer.add_scalar("behavior/contra_rate", behavior.contra_rate, iteration)
             _log_eval(writer, "vs_random", report_vs_random, iteration)
             _log_eval(writer, "vs_heuristic", report_vs_heuristic, iteration)
             if config.heldout_offsets:

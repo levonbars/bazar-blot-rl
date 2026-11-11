@@ -142,3 +142,45 @@ def test_recompute_log_prob_matches_decide_when_network_unchanged() -> None:
             tracked.step(SPACE.decode(decision.action_idx))
     assert checked_auction > 0
     assert checked_play > 0
+
+
+def test_forced_contra_prob_doubles_whenever_doubling_is_legal_and_scores_it_correctly() -> None:
+    """`forced_contra_prob=1.0` must double at every decision where contra or recontra is legal
+    (and flag it as forced), and the recorded log-probability must still be the network's own
+    probability of that action -- the same property that keeps the forced bid sound for PPO."""
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    net.eval()
+    rng = random.Random(4)
+    forced_seen = natural_seen = 0
+    for deal_id in range(25):
+        deal = Deal(RULES, dealer=deal_id % 4, hands=deal_hands(rng, RULES), deal_id=deal_id)
+        tracked = TrackedDeal(deal)
+        while deal.phase == Phase.AUCTION:
+            info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=deal_id)
+            mask = legal_mask(info, SPACE)
+            decision = decide(net, info, SPACE, mask, sample=True, forced_contra_prob=1.0)
+            can_double = bool(mask[1] or mask[2])
+            if can_double:
+                assert decision.action_idx in (1, 2) and decision.forced
+                forced_seen += 1
+                log_prob, _entropy, _value = recompute_log_prob(
+                    net,
+                    SPACE,
+                    torch.from_numpy(decision.obs),
+                    decision.mask,
+                    decision.phase,
+                    decision.base_level,
+                    decision.action_idx,
+                )
+                assert log_prob.item() == pytest.approx(decision.log_prob, abs=1e-5)
+            else:
+                assert not decision.forced
+                natural_seen += 1
+            tracked.step(SPACE.decode(decision.action_idx))
+        while deal.phase == Phase.PLAY:
+            info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=deal_id)
+            decision = decide(net, info, SPACE, legal_mask(info, SPACE), sample=True)
+            assert not decision.forced
+            tracked.step(SPACE.decode(decision.action_idx))
+    assert forced_seen > 0 and natural_seen > 0

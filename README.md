@@ -287,8 +287,10 @@ training heuristic by about +5; training only against that heuristic over-fit to
 wider opponent pool (heuristics of many bidding styles, the always-pass bidder, the clone,
 earlier snapshots) fixed most of that: it now beats heuristics of every bidding style from
 timid to reckless with a CI above zero (`python -m bazarblot.cli.robustness`). Open: it never
-doubles (the cloned teacher never did), so it cannot punish over-bidding directly, and it
-contests nearly every auction. Full account in
+doubles (the cloned teacher never did). A hand-written "double when they can't reach their
+number" rule adds 9 to 22 points against over-bidders, so doubling is valuable, but simply
+exploring it during training did not teach the agent and made it worse; how to get it learned is
+the open decision. Full account in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
