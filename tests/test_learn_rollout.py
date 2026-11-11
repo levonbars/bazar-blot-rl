@@ -114,6 +114,22 @@ def test_learner_declare_rate_tracks_contested_deals_only() -> None:
     assert 0.0 <= rate <= 1.0
 
 
+def test_bid_agent_takes_every_auction_decision_and_learner_trains_on_play_only() -> None:
+    """With a fixed `bid_agent`, the learner records NO auction transitions (it cannot influence
+    the auction) and every recorded transition is a card play -- the setup that rules out the
+    pass-everything shortcut and isolates play skill (roadmap M7 stage 1)."""
+    from bazarblot.core.deal import Phase
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    transitions, stats = collect_rollout(
+        RULES, SPACE, net, n_deals=30, seed=0, bid_agent=HeuristicAgent(RULES)
+    )
+    assert stats.n_deals == 30
+    assert len(transitions) > 0
+    assert all(t.decision.phase == Phase.PLAY for t in transitions)
+
+
 def test_deal_margin_reward_is_antisymmetric() -> None:
     for margin in (0.0, 8.0, 56.0, 216.0, -216.0):
         assert deal_margin_reward(margin) == pytest.approx(-deal_margin_reward(-margin))

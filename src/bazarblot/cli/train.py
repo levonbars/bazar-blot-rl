@@ -26,6 +26,12 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--forced-bid-prob-start", type=float, default=0.4)
     p.add_argument("--forced-bid-prob-end", type=float, default=0.05)
     p.add_argument("--forced-bid-anneal-frac", type=float, default=1.0)
+    p.add_argument(
+        "--bid-agent",
+        choices=["heuristic"],
+        default=None,
+        help="train card play only, with this agent making every auction decision",
+    )
     p.add_argument("--opponent-prob", type=float, default=0.3)
     p.add_argument("--snapshot-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=20)
@@ -44,6 +50,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         forced_bid_prob_start=args.forced_bid_prob_start,
         forced_bid_prob_end=args.forced_bid_prob_end,
         forced_bid_anneal_frac=args.forced_bid_anneal_frac,
+        bid_agent=args.bid_agent,
         opponent_prob=args.opponent_prob,
         snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,

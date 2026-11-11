@@ -72,3 +72,33 @@ def test_train_smoke_runs_end_to_end(tmp_path) -> None:  # type: ignore[no-untyp
 
     mid_checkpoints = list((tmp_path / "checkpoints").glob("iter_*.pt"))
     assert len(mid_checkpoints) >= 1
+
+
+def test_train_play_only_with_heuristic_bidder_smoke(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    config = TrainConfig(
+        n_iterations=3,
+        n_deals_per_iter=6,
+        seed=0,
+        ppo=PPOConfig(epochs=1, minibatch_size=32),
+        bid_agent="heuristic",
+        opponent_prob=0.5,
+        snapshot_every=1,
+        eval_every=2,
+        eval_n_pairs=3,
+        checkpoint_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    train(config, rules=RULES)
+    assert (tmp_path / "checkpoints" / "final.pt").exists()
+
+
+def test_train_rejects_unknown_bid_agent(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    config = TrainConfig(
+        n_iterations=1,
+        n_deals_per_iter=2,
+        bid_agent="nonsense",
+        checkpoint_dir=tmp_path / "c",
+        log_dir=tmp_path / "r",
+    )
+    with pytest.raises(ValueError, match="unknown bid_agent"):
+        train(config, rules=RULES)

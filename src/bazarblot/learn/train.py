@@ -17,6 +17,8 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from bazarblot.agents.base import Agent
+from bazarblot.agents.composed import ComposedAgent
 from bazarblot.agents.heuristic import HeuristicAgent
 from bazarblot.agents.nn.network import build_network
 from bazarblot.agents.nn.ppo_agent import NNAgent
@@ -44,6 +46,11 @@ class TrainConfig:
     forced_bid_prob_start: float = 0.4
     forced_bid_prob_end: float = 0.05
     forced_bid_anneal_frac: float = 1.0
+    bid_agent: str | None = None
+    """`"heuristic"` trains card play only, with `HeuristicAgent` making every auction decision for
+    every seat (roadmap M7 stage 1); `None` is the original joint bid-and-play training. Evaluation
+    then pits `heuristic bidding + learned play` against `heuristic bidding + baseline play`, so a
+    margin reflects play skill alone and cannot come from conceding auctions."""
     opponent_prob: float = 0.3
     pool_max_size: int = 8
     snapshot_every: int = 20
@@ -143,6 +150,9 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     # equilibrium within a handful of updates, and a fixed baseline that reliably contests
     # auctions is what breaks that symmetry.
     baseline_opponents: list[Opponent] = [heuristic_agent, random_agent]
+    if config.bid_agent not in (None, "heuristic"):
+        raise ValueError(f"unknown bid_agent {config.bid_agent!r}; expected None or 'heuristic'")
+    bid_agent = heuristic_agent if config.bid_agent == "heuristic" else None
 
     for iteration in range(config.n_iterations):
         forced_bid_prob = _forced_bid_prob_at(iteration, config)
@@ -158,6 +168,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             gamma=config.gamma,
             lam=config.lam,
             forced_bid_prob=forced_bid_prob,
+            bid_agent=bid_agent,
         )
         t_rollout = time.perf_counter() - t0
 
@@ -201,11 +212,15 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
 
         if (iteration + 1) % config.eval_every == 0:
             net.eval()
-            nn_agent = NNAgent(net, sample=False)
+            nn_agent: Agent = NNAgent(net, sample=False)
+            random_baseline: Agent = random_agent
+            if bid_agent is not None:
+                nn_agent = ComposedAgent(bid_agent, nn_agent)
+                random_baseline = ComposedAgent(bid_agent, random_agent)
             seeds = [eval_rng.randrange(1 << 30) for _ in range(config.eval_n_pairs)]
             dealers = [eval_rng.randrange(4) for _ in range(config.eval_n_pairs)]
             report_vs_random = evaluate_pairs(
-                rules, space, seeds, dealers, nn_agent, random_agent, n_resamples=2000
+                rules, space, seeds, dealers, nn_agent, random_baseline, n_resamples=2000
             )
             report_vs_heuristic = evaluate_pairs(
                 rules, space, seeds, dealers, nn_agent, heuristic_agent, n_resamples=2000

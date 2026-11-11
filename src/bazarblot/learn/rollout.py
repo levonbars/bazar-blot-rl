@@ -91,6 +91,7 @@ def _play_one(
     learner: PolicyValueNet,
     seat_actors: dict[int, Opponent],
     forced_bid_prob: float = 0.0,
+    bid_agent: Agent | None = None,
 ) -> tuple[dict[int, list[Transition]], float, bool, int | None]:
     """Play one deal; `seat_actors[seat]` decides seat `seat`'s actions -- either `learner`
     itself, a frozen `PolicyValueNet` snapshot from the opponent pool, or an arbitrary `Agent`
@@ -100,6 +101,12 @@ def _play_one(
     have an attacking team at all). `forced_bid_prob` is applied only to the LEARNER's own
     auction decisions (see `agents/nn/ppo_agent.py::_auction_decision`) -- opponents play
     unperturbed, exactly as they would for real.
+
+    `bid_agent`, when given, makes EVERY auction decision for EVERY seat (learner and opponents
+    alike) and no auction transition is recorded: the learner is trained on card play only, under
+    auctions it cannot influence. This is the first stage of the plan to fix the agent never
+    bidding (`docs/03-implementation-roadmap.md` M7): with bidding held fixed there is no
+    pass-everything shortcut to fall into, and play skill can be measured on its own.
 
     **A 4-pass abort is scored as a real, zero-margin outcome -- it is NOT discarded**, unlike
     `eval/duplicate.py`, which discards and resamples specifically to preserve its "identical
@@ -128,7 +135,9 @@ def _play_one(
         info = info_set(tracked, seat, match_score=(0, 0), deal_number=0)
         mask = legal_mask(info, space)
         actor = seat_actors[seat]
-        if actor is learner:
+        if bid_agent is not None and info.phase == Phase.AUCTION:
+            action_idx = bid_agent.act(info, space, mask)
+        elif actor is learner:
             decision = decide(
                 learner, info, space, mask, sample=True, forced_bid_prob=forced_bid_prob
             )
@@ -158,6 +167,7 @@ def collect_rollout(
     gamma: float = 1.0,
     lam: float = 0.95,
     forced_bid_prob: float = 0.0,
+    bid_agent: Agent | None = None,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
 
@@ -165,6 +175,9 @@ def collect_rollout(
     auction sampling toward `BID` during collection, without touching what `legal_mask` itself
     says is legal and without corrupting the recorded log-probabilities PPO's update depends on.
     Zero by default (no effect); `learn/train.py` anneals it down over a training run.
+
+    `bid_agent` (see `_play_one`) takes over all auction decisions so the learner trains on card
+    play alone; `forced_bid_prob` is then moot.
 
     Each shuffle is either pure self-play (all four seats `learner`) or, with probability
     `opponent_prob` when `opponent_pool` is non-empty, `learner` at two seats against one
@@ -209,7 +222,14 @@ def collect_rollout(
 
         for seat_actors in seat_assignments:
             transitions, margin_team0, aborted, attackers_team = _play_one(
-                rules, space, deal_seed_value, dealer, learner, seat_actors, forced_bid_prob
+                rules,
+                space,
+                deal_seed_value,
+                dealer,
+                learner,
+                seat_actors,
+                forced_bid_prob,
+                bid_agent,
             )
             stats.n_deals += 1
             if aborted:
