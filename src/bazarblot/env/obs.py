@@ -38,11 +38,11 @@ from bazarblot.core.auction import BidAction, ContraAction, PassAction, Recontra
 from bazarblot.core.cards import N_CARDS, RANKS, SUITS, TEAM_OF, ContractType, card_id, suit_of
 from bazarblot.core.declarations import Meld, detect_hand_melds, resolve_combinations_from_melds
 from bazarblot.core.play import current_winner
-from bazarblot.core.scoring import round10
+from bazarblot.core.rules import RuleConfig
 from bazarblot.env.infoset import InfoSet
 from bazarblot.env.tracked_deal import AuctionEvent
 
-OBS_VERSION = "v1"
+OBS_VERSION = "v2"
 
 Array = npt.NDArray[np.float32]
 
@@ -388,6 +388,14 @@ def _running_points_block(info: InfoSet) -> Array:
     )
 
 
+def _fulfilment_margin(raw_cards: int, raw_combos: int, level: int, rules: RuleConfig) -> int:
+    """Raw points by which the attackers are over (+) or under (-) their bid: card points plus (if
+    the preset says combinations count) combination points, against `10 * level` -- the engine's
+    own test for whether a contract is made. Both inputs are RAW points."""
+    basis = raw_cards + (raw_combos if rules.scoring.combinations_count_for_fulfilment else 0)
+    return basis - 10 * level
+
+
 def _contract_progress_block(info: InfoSet) -> Array:
     out = np.zeros(BLOCK_SHAPES["contract_progress"], dtype=np.float32)
     if info.contract is None or info.tables is None:
@@ -412,9 +420,13 @@ def _contract_progress_block(info: InfoSet) -> Array:
         combo = resolve_combinations_from_melds(all_melds, info.rules, leader_seat)
         combo_a = combo.team_points[attacking_team]
 
-    total_scaled_a = round10(raw_a, info.rules) + combo_a
+    # Same basis the engine uses to decide whether a contract is made (`core/scoring.py`):
+    # raw card points plus raw combination points against `10 * level`. v1 of this feature
+    # scaled the card points down to bid units and then added the RAW combination points on top,
+    # overstating a team with a 20-point tierce by 18 bid levels -- so `need_met_sign` told the
+    # network a hopeless contract was already made. Fixed in `OBS_VERSION` v2.
     level = info.contract.level
-    margin = total_scaled_a - level
+    margin = _fulfilment_margin(raw_a, combo_a, level, info.rules)
     need_met_sign = float((margin > 0) - (margin < 0))
 
     attackers_all_so_far = all(
@@ -487,9 +499,9 @@ def _encode_auction_event(
 
 
 def encode(info: InfoSet) -> dict[str, Array]:
-    """`InfoSet` -> the `v1` feature blocks (spec §4.3), seat-relative throughout. Deterministic
-    and pure — same `InfoSet` always encodes to the same tensors, which is exactly what the
-    leakage test in `tests/test_env_infoset.py` relies on."""
+    """`InfoSet` -> the feature blocks (spec §4.3, `OBS_VERSION`), seat-relative throughout.
+    Deterministic and pure — same `InfoSet` always encodes to the same tensors, which is exactly
+    what the leakage test in `tests/test_env_infoset.py` relies on."""
     contract_type, level, capot, declarer_seat, doubling = _effective_contract(info)
 
     blocks: dict[str, Array] = {

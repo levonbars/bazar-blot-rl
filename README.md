@@ -271,14 +271,18 @@ decision alone). Full account, including the off-by-one the bid-factoring math f
 spec's own worked arithmetic, in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
 
-**Current direction (agreed):** stop making joint PPO discover bidding. Train card play first
-under a fixed heuristic bidder, then choose bids by evaluation (a value model built from paired
-counterfactual replays of the same deal with different bids), and let bidding conventions (bids that
-tell the partner about the hand) emerge from self-play; human conventions come later. So far: a
-behavior-cloned player reaches heuristic-level card play (PPO from scratch stayed at random level,
-and PPO fine-tuning of the clone held but did not improve it), and a belief head predicts the
-unseen cards (0.49 accuracy vs 0.33 chance), which is also how we will measure what the bids
-convey. Next: the bid-value model and bid-by-evaluation, then measuring the information bids carry.
+**What went wrong, and the current direction.** The agent kept learning never to bid, and for a
+long time that looked like a learning-method problem. It was not: the heuristic baseline had a
+units bug (combination points added after the bid scale was applied), so it over-bid wildly and
+made 11% of its contracts, and against it conceding every auction really was the best strategy.
+Fixed (`OBS_VERSION` is now `v2`): the heuristic now makes 90% of its contracts, declaring is worth
++16.5 points per deal, and it beats an always-pass bidder by +12 (`python -m
+bazarblot.cli.baselines`). Everything trained or measured before that fix is against a broken
+opponent. Direction: clone the fixed heuristic's bidding and play, train bidding and play together
+in self-play, scale up, and measure how bids signal to the partner as that emerges (the belief
+head predicts the unseen cards; the question is how much better it does after hearing the
+auction). Human conventions come later. Full account in
+[`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

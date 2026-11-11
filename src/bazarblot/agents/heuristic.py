@@ -52,19 +52,24 @@ def _estimate_scaled_value(
     hand: frozenset[int], contract_type: ContractType, rules: RuleConfig
 ) -> int:
     """A rough "what could my team plausibly make in this contract" estimate, in the same
-    scaled units as a bid level (8..80) — own hand's raw points, scaled down, plus a length
-    bonus for a long trump suit, plus a crude partner-share estimate, plus my own detected
-    combination value (which counts toward fulfilment for real, unlike the rest of this
-    estimate)."""
+    scaled units as a bid level (8..80): own hand's raw points plus a length bonus for a long trump
+    suit, a crude partner-share estimate and my own detected combinations, all summed in RAW
+    points and only then divided by 10.
+
+    Combinations are raw points and count toward fulfilment exactly like card points (a contract
+    is made when cards + combinations reach `10 * level`, `core/scoring.py`). An earlier version
+    added them AFTER dividing the rest by 10, so a 20-point tierce inflated the bid by 20 levels
+    instead of 2: the "club player" bid wildly beyond its means and made 11% of its contracts.
+    Everything trained against it learned from that (`docs/03-implementation-roadmap.md` M7)."""
     tables = build_tables(contract_type, rules)
     own_raw = sum(tables.points[c] for c in hand)
     n_trump = sum(1 for c in hand if tables.is_trump[c]) if contract_type != "NT" else 0
     trump_bonus = max(0, n_trump - 3) * _TRUMP_LENGTH_BONUS_PER_CARD
-    combo_value = sum(m.value for m in detect_hand_melds(hand, 0, contract_type, rules))
+    combo_raw = sum(m.value for m in detect_hand_melds(hand, 0, contract_type, rules))
     deal_total = rules.contracts.deal_card_points
     remaining_raw = max(0, deal_total - own_raw)
     partner_estimate = int(remaining_raw * _PARTNER_SHARE)
-    return (own_raw + trump_bonus + partner_estimate) // 10 + combo_value
+    return (own_raw + trump_bonus + partner_estimate + combo_raw) // 10
 
 
 class HeuristicAgent:

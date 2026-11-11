@@ -611,15 +611,14 @@ nothing here depends on or tests match-level order-invariance the way the deal-l
 own test suite now does.)
 
 **A real finding about the M4 heuristic bidder, surfaced by the harness rather than assumed:**
-`HeuristicAgent` only ever ends up declaring against an aggressively-overbidding `RandomAgent` in
-the rare cases its own estimate is inflated by a large combination and gets capped at the bid
+`HeuristicAgent` only ever ended up declaring against an aggressively-overbidding `RandomAgent` in
+the rare cases its own estimate was inflated by a large combination and got capped at the bid
 ladder's ceiling (level 80) — and in a 600-instance sample, every single one of those (10/10)
-then failed. This is a real calibration gap (the bidder's combo-value estimate has no discount
-for the risk that an opponent's combination beats it) that doesn't block M4's own "beats random
-by a wide margin" bar — the overall paired margin is still overwhelmingly positive — but is
-exactly the kind of thing an evaluation harness is supposed to catch. Left unfixed here
-deliberately: fixing agent quality is a different task than building the harness that found the
-issue, and is noted as a candidate follow-up rather than scope-crept into M5.
+then failed. It was first read as a calibration gap (no discount for an opponent's combination
+beating it). **The real cause was found later, during M7: a units bug.** The estimate added
+combination values (raw points, a tierce = 20) to a total already divided by 10, so a tierce
+inflated the bid by ~20 levels instead of ~2. The fixed heuristic reaches a contract in 82% of
+self-play deals and makes 90% of them; the buggy one made 11%. See M7 below.
 
 **`evaluate_dd_oracle_metrics` is the expensive tier, kept clearly separate from `evaluate_pairs`
 rather than blended into one function.** It needs 5 full DD solves per deal (one per candidate
@@ -739,12 +738,15 @@ Model-free baseline, per spec §7.1(1).
 
 ### M7 status: **pipeline built and stable; the agent does not yet bid, so the done-when bar is NOT met in substance**
 
-> **Read this first.** The paired-evaluation numbers below are real, but a follow-up check
-> (section "The agent never bids" at the end of this status) showed they come from a
-> pass-and-defend policy: the greedy final checkpoints of both full runs declared 0 times
-> (0 of 66 and 0 of 104 completed deals) against `HeuristicAgent`. "Beats `heuristic` with a CI excluding 0" is formally true and says nothing
-> about bidding skill. The sections are kept in the order they were written; later sections
-> correct earlier ones.
+> **Read this first.** Two things below were wrong at the time they were written, and later
+> sections correct earlier ones (the sections are kept in the order they were written).
+> (1) The paired-evaluation margins (+60 to +200 against the heuristic and random) did not
+> measure bidding skill: the greedy checkpoints declared 0 times (0 of 66 and 0 of 104 completed
+> deals). (2) **The cause was a bug in the heuristic bidder, not the learning method** (section
+> "Root cause" at the end of this status): it over-bid by ~20 levels per combination and made 11%
+> of its contracts, so against it, conceding every auction and defending really was the winning
+> strategy, and every agent trained or cloned against it learned from that. All checkpoints and
+> margins from before that fix are against a broken opponent and should not be relied on.
 
 Built as `src/bazarblot/agents/nn/` (the model: `bid_factor.py`, `network.py`, `ppo_agent.py`) and
 `src/bazarblot/learn/` (the training loop: `reward.py`, `rollout.py`, `ppo.py`, `opponent_pool.py`,
@@ -851,7 +853,7 @@ during training instead of only afterwards.
    roughly 0.55 mid-run falling to roughly 0.38 at the end. So the floor slows the slide back toward
    passing but does not reverse it, and the network never makes `BID` its argmax on any hand.
 
-**Likely mechanism (a hypothesis, not yet tested).** Declaring only pays if the declarer plays well,
+**Likely mechanism (a hypothesis, SUPERSEDED by the "Root cause" section below).** Declaring only pays if the declarer plays well,
 and play skill is learned largely from defending, which needs no bids. Early on, forced bids really
 are losing bets, so the value function correctly learns that; with forcing reduced there is no fresh
 evidence to revise that verdict as play improves. Two further candidates not yet ruled out: credit
@@ -898,7 +900,7 @@ and `ppo_agent.py` are not device-aware, and for a ~260K-parameter MLP the payof
   (range -0.50 to +0.17; CI excluding 0 in our favour in 0/16, against us in 2/16; by quarter
   -0.06, -0.08, -0.23, -0.20). Against random play it averaged +1.14 (CI above 0 in 15/16). Policy
   entropy drifted up from 0.02 to ~0.08, KL stayed ~0.003-0.007.
-- *Reading, partly hypothesis:* under identical bidding, card play moves the margin by only about
+- *Reading, partly hypothesis (SUPERSEDED: this was measured under the buggy bidder; with sane bidding heuristic play beats random play by +3.7 and the "signal is weak" conclusion is not established):* under identical bidding, card play moves the margin by only about
   1-2 points (the heuristic beats random play by roughly that), against a per-pair standard
   deviation near 11, so a play-only terminal reward is a very weak training signal. That PPO
   holds the clone's level but cannot improve it fits this, but it does not prove it; a
@@ -909,7 +911,43 @@ and `ppo_agent.py` are not device-aware, and for a ~260K-parameter MLP the payof
   paired counterfactual rollouts (the same deal replayed with different bids, which cancels deal
   luck). Stronger play can be pursued in parallel and swapped in later.
 
-Full project suite passes (`pytest`, 354 tests); `ruff check`/`ruff format --check` and `mypy
+**Root cause: the heuristic bidder's units bug (found by checking the baseline itself).** The M7
+runs kept failing in ways that looked like a learning problem, so the baseline was examined:
+with all four seats playing the heuristic, only 11% of contracts were made, the median bid was 28
+and declaring was worth -48 points per deal; an always-pass bidder beat the heuristic by +37.5
+(CI +35.2 to +40.0). The cause: `agents/heuristic.py` added combination values (raw points: a
+tierce is 20) to a total already divided by 10. Contracts are made when card points plus
+combination points reach `10 * level` (`core/scoring.py`), so combinations belong in the same
+raw sum. The same mix-up was in two other places: the observation's `contract_progress`
+need-met feature (`env/obs.py`) and the double-dummy bid-accuracy metric (`eval/metrics.py`).
+
+Fixed in all three; `OBS_VERSION` is now `v2` (checkpoints from `v1` are refused). Re-measured
+with `python -m bazarblot.cli.baselines` (400 pairs, 2000 self-play deals):
+
+- Heuristic in all four seats: 82% of deals reach a contract, 90% of contracts are made, median
+  bid 9 (p90 14), declaring is worth +16.5 points per deal. (It is timid, bidding near the
+  minimum; it is a fixed reference, not tuned.)
+- Heuristic beats an always-pass bidder with the same play by +12.2 (CI +11.2 to +13.3); before
+  the fix, always-pass beat it by +37.5.
+- Heuristic play vs random play under identical heuristic bidding: +3.7 (CI +3.0 to +4.5), against
+  +1.2 under the buggy bidder. Card play matters more than the buggy bidder suggested, and this
+  heuristic still ignores the auction when playing, so this is a floor, not a ceiling.
+
+`agents/pass_bidder.py` (always-pass) and `eval/behavior.py` (contract, declare and made rates and
+self-play contract rate) are now standard: every learned agent is checked against always-pass and
+its behaviour is logged at each evaluation, so a margin earned by conceding auctions cannot pass
+as skill again.
+
+**Plan from here:** (1) done: fix the units bug and re-measure. (2) Clone the fixed heuristic for
+bidding as well as play, so exploration starts from sane bids. (3) Train bidding and play together
+in self-play with a value estimate that sees all four hands during training only, against itself,
+the fixed heuristic and the always-pass bidder. (4) Scale up (parallel rollouts, millions of
+deals). (5) Measure signaling as it emerges: how much better the belief head predicts partner's
+cards after the auction, and whether changing partner's bid for the same cards changes the card
+played. (6) Strengthen play (solver teacher for endgames) and test against the search agent;
+human conventions come after that.
+
+Full project suite passes (`pytest`, 361 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

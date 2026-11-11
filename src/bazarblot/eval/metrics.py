@@ -132,6 +132,14 @@ class DDOracleReport:
     recomputation that only re-optimizes the declaring side."""
 
 
+def scaled_value(raw_cards: int, raw_combos: int, rules: RuleConfig) -> int:
+    """A team's result in BID units: card points and combination points are both raw, so they are
+    summed first and scaled once. (v1 scaled the card points and added the raw combination points
+    on top, which overstated every hand holding a combination by ~9x the combination's value in
+    bid levels.)"""
+    return round10(raw_cards + raw_combos, rules)
+
+
 def evaluate_dd_oracle_metrics(
     rules: RuleConfig,
     space: ActionSpace,
@@ -203,7 +211,7 @@ def evaluate_dd_oracle_metrics(
             dd_points = oracle_solved[i * len(contract_types) + j].declarer_points
             combo_result = resolve_combinations(hands, ct, rules, leader)
             combo = combo_result.team_points[result.attackers_team]
-            scaled = round10(dd_points, rules) + combo
+            scaled = scaled_value(dd_points, combo, rules)
             best_level = max(best_level, scaled)
 
         actual_level = result.contract.level

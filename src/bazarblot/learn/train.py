@@ -25,6 +25,7 @@ from bazarblot.agents.nn.ppo_agent import NNAgent
 from bazarblot.agents.random_agent import RandomAgent
 from bazarblot.core.rules import RuleConfig, load_default
 from bazarblot.env.actions import build_action_space
+from bazarblot.eval.behavior import evaluate_behavior
 from bazarblot.eval.metrics import evaluate_pairs
 from bazarblot.learn.checkpoint import load_checkpoint, save_checkpoint
 from bazarblot.learn.opponent_pool import OpponentPool
@@ -249,6 +250,18 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             report_vs_heuristic = evaluate_pairs(
                 rules, space, seeds, dealers, nn_agent, heuristic_agent, n_resamples=2000
             )
+            behavior = evaluate_behavior(
+                rules, space, nn_agent, heuristic_agent, seeds[:60], dealers[:60]
+            )
+            print(f"  [behavior vs heuristic] {behavior.summary()}")
+            writer.add_scalar("behavior/contract_rate", behavior.contract_rate, iteration)
+            writer.add_scalar(
+                "behavior/selfplay_contract_rate", behavior.selfplay_contract_rate, iteration
+            )
+            if behavior.declare_rate is not None:
+                writer.add_scalar("behavior/declare_rate", behavior.declare_rate, iteration)
+            if behavior.made_rate is not None:
+                writer.add_scalar("behavior/made_rate", behavior.made_rate, iteration)
             _log_eval(writer, "vs_random", report_vs_random, iteration)
             _log_eval(writer, "vs_heuristic", report_vs_heuristic, iteration)
             net.train()

@@ -21,7 +21,10 @@ _FLAT_DIM = sum(int(np.prod(s)) for s in BLOCK_SHAPES.values())
 
 
 def test_obs_version_is_stamped() -> None:
-    assert OBS_VERSION == "v1"
+    # v2: `contract_progress`'s need-met feature now sums raw card and combination points before
+    # comparing with the bid (v1 added raw combination points to a scaled card total). Checkpoints
+    # trained on v1 are refused by `learn/checkpoint.py`, as the version rule intends.
+    assert OBS_VERSION == "v2"
 
 
 def _play_random_deal(seed: int) -> tuple[Deal, TrackedDeal]:
