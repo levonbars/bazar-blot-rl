@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # weekly (Mondays 06:00 UTC): runs the slow tier below
 
 jobs:
   check:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -50,8 +54,26 @@ jobs:
         run: |
           coverage report --include="src/bazarblot/core/*" --fail-under=95
 
-      # `slow`-marked tests (larger random-playout sample counts) run every CI build too —
-      # they're currently cheap (~5s for 20k deals) — but stay a separate step so a future,
-      # genuinely expensive nightly-scale run can be split out without touching the fast tier.
+  # The `slow`-marked tests are full double-dummy solves (minutes each; the whole tier took over
+  # 30 minutes on a GitHub runner), so they stay out of the per-push loop. They run weekly and on
+  # demand (`gh workflow run CI`) on a single Python version.
+  slow:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install torch (CPU wheel)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - run: pip install -e ".[dev,ui,env,learn]"
+
       - name: Tests (slow tier)
         run: pytest -q -m slow
