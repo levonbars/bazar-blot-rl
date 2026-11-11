@@ -180,3 +180,21 @@ def test_teammates_receive_identical_terminal_reward() -> None:
     assert len(nonzero_rewards) == 2 * n_completed
     for i in range(0, len(nonzero_rewards), 2):
         assert nonzero_rewards[i] == pytest.approx(nonzero_rewards[i + 1])
+
+
+def test_reward_scale_controls_how_much_large_margins_saturate() -> None:
+    """A larger `reward_scale` keeps big margins distinguishable: with scale 24 a margin of 40 and
+    one of 70 differ by ~0.06 in reward, with scale 96 by ~0.2."""
+    small = deal_margin_reward(70.0, 24.0) - deal_margin_reward(40.0, 24.0)
+    large = deal_margin_reward(70.0, 96.0) - deal_margin_reward(40.0, 96.0)
+    assert small < 0.07 and large > 0.18
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    a, _ = collect_rollout(RULES, SPACE, net, n_deals=10, seed=0, reward_scale=24.0)
+    torch.manual_seed(0)
+    b, _ = collect_rollout(RULES, SPACE, net, n_deals=10, seed=0, reward_scale=96.0)
+    ra = [t.reward for t in a if t.reward != 0.0]
+    rb = [t.reward for t in b if t.reward != 0.0]
+    assert len(ra) == len(rb) > 0
+    assert all(abs(y) < abs(x) for x, y in zip(ra, rb, strict=True))  # same margins, gentler squash

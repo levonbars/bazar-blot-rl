@@ -12,7 +12,12 @@ torch = pytest.importorskip("torch")
 import numpy as np  # noqa: E402
 
 from bazarblot.agents.heuristic import HeuristicAgent  # noqa: E402
-from bazarblot.agents.nn.network import META_BID, META_PASS, build_network  # noqa: E402
+from bazarblot.agents.nn.network import (  # noqa: E402
+    META_BID,
+    META_CONTRA,
+    META_PASS,
+    build_network,
+)
 from bazarblot.core.rules import load_default  # noqa: E402
 from bazarblot.env.actions import build_action_space  # noqa: E402
 from bazarblot.learn.belief import IGNORE  # noqa: E402
@@ -116,3 +121,37 @@ def test_cloned_network_actually_bids_and_completes_auctions() -> None:
     report = evaluate_behavior(RULES, SPACE, NNAgent(net, sample=False), teacher, seeds, dealers)
     assert report.declare_rate is not None and report.declare_rate > 0.1
     assert report.selfplay_contract_rate > 0.3
+
+
+def test_opponents_restrict_recording_to_the_teachers_seats() -> None:
+    """With an opponent table, only the teacher's decisions are recorded (about half as many as
+    when the teacher plays all four seats), and `opponent is teacher` is the all-teacher case."""
+    teacher = HeuristicAgent(RULES)
+    everyone = collect_imitation_data(RULES, SPACE, teacher, n_deals=80, seed=5)
+    vs_aggressive = collect_imitation_data(
+        RULES, SPACE, teacher, n_deals=80, seed=5, opponents=[HeuristicAgent(RULES, bid_offset=4)]
+    )
+    ratio = vs_aggressive.n_auction / everyone.n_auction
+    assert 0.3 < ratio < 0.8
+    assert vs_aggressive.a_obs.shape[0] == vs_aggressive.n_auction > 0
+
+    same = collect_imitation_data(RULES, SPACE, teacher, n_deals=80, seed=5, opponents=[teacher])
+    assert np.array_equal(same.action, everyone.action)
+    assert np.array_equal(same.a_meta, everyone.a_meta)
+
+
+def test_a_rule_doubler_teacher_produces_doubling_labels_against_overbidders() -> None:
+    """Doubling only comes up against bids worth doubling: the data must contain doubling labels
+    when the rule-wrapped teacher faces reckless bidders, and (essentially) none when it plays a
+    plain heuristic table."""
+    from bazarblot.agents.doubling import RuleDoubler
+
+    base = HeuristicAgent(RULES)
+    teacher = RuleDoubler(base, RULES, slack=0)
+    reckless = collect_imitation_data(
+        RULES, SPACE, teacher, n_deals=120, seed=1, opponents=[HeuristicAgent(RULES, bid_offset=10)]
+    )
+    assert int((reckless.a_meta == META_CONTRA).sum()) > 5
+
+    plain = collect_imitation_data(RULES, SPACE, base, n_deals=120, seed=1)
+    assert int((plain.a_meta == META_CONTRA).sum()) == 0

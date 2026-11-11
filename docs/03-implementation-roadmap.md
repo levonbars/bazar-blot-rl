@@ -1090,19 +1090,61 @@ saturates for the large margins that a doubled failure produces (a margin of 40 
 by 0.06 in reward), so a concave reward makes the large-stakes decisions look less attractive than
 they are. The training pool also only goes up to offset +6, where doubling gains least.
 
-**Decision needed (not yet taken):** (a) bootstrap doubling from the rule: clone `RuleDoubler`
-(slack ~3-6) as the teacher for doubling states, then let PPO refine, gated on the held-out
-profile; fast and reliable, but hand-written knowledge goes in; (b) test the reward-saturation
-explanation with a less saturating reward and keep exploration, to let the agent find doubling on
-its own; slower and uncertain; (c) leave doubling and move to scaling up and signaling. The
-exploration option stays in the code but off by default.
+**Step 3d: doing (a) then (b).**
 
-**After that:** (4) scale up (parallel rollouts, millions of deals) once the profile is healthy;
-(5) measure signaling: how much better the belief head predicts partner's cards after the
-auction, and whether changing partner's bid for the same cards changes the card played; (6)
-stronger play (solver teacher for endgames) and the search-based baseline.
+*(a) Bootstrap doubling from the rule, then refine with PPO: it works and gives the best profile so
+far.* `cli/distill.py` clones a teacher into a copy of its own network: the teacher is the 3b agent
+with `RuleDoubler` (slack 3) on top, played against eight kinds of opponent (heuristics at offsets
+-4, -2, 0, +1, +3, +6, the always-pass bidder, itself; only the teacher's decisions are recorded,
+`collect_imitation_data(opponents=...)`). Because the student starts AS the 3b network, it keeps
+what reinforcement learning taught it and only has to add the doubling. 24,000 deals gave 427k
+card-play and 77k auction samples, 3,828 of them doubling decisions; 8 epochs at lr 3e-4; held-out
+agreement with the teacher: card 97.9%, pass/bid/double 96.7%, bid level 97.5%, suit 97.8%. On its
+own, with no rule on top, the distilled network doubles and reproduces the rule-wrapped teacher
+(vs +8: +36.8 against the teacher's +37.2). Then 200 iterations of PPO with the 3b settings, no
+forced exploration, started from it: the network keeps doubling on its own in 6-7% of its
+chances throughout, and PPO recovered most of the rule's cost against normal bidders while keeping
+the gain (fresh seeds, 300 pairs, margin over each heuristic style):
 
-Full project suite passes (`pytest`, 384 tests); `ruff check`/`ruff format --check` and `mypy
+| agent | -6 | -3 | -1 | 0 | +2 | +4 | +8 | +12 |
+|---|---|---|---|---|---|---|---|---|
+| clone | +7.8 | +4.1 | +0.6 | -0.4 | +0.7 | +7.9 | +26.0 | +33.9 |
+| 3b (wide pool) | +8.2 | +7.4 | +6.1 | +5.4 | +2.7 | +5.4 | +20.2 | +29.2 |
+| 3c (explore doubling, scale 24) | +6.8 | +6.1 | +3.9 | +3.2 | -0.3 | +0.8 | +10.7 | +16.7 |
+| 3d(b) (explore doubling, scale 96) | +7.8 | +7.1 | +5.5 | +4.1 | +2.2 | +7.5 | +19.3 | +25.7 |
+| 3d(a) distilled from rule | +6.8 | +5.9 | +4.5 | +3.7 | +1.6 | +4.7 | +36.8 | +50.7 |
+| **3d(a) + PPO (200 iterations)** | **+7.9** | **+6.7** | **+5.0** | **+4.3** | **+2.9** | **+5.1** | **+34.8** | **+50.6** |
+
+Every one of the eight CIs excludes 0 in its favour (lowest +2.9, CI +0.8 to +4.8). Against
+over-bidders it gains 15 (+8) and 21 (+12) points on 3b; against bidders at offsets -6 to +4 it is
+within about 1 point of 3b (the intervals overlap). Self-play: all auctions end in a contract, 65%
+of contracts made, median bid 12, declaring worth +7.1. This is the agent to build on. Caveats:
+the doubling behaviour comes from a hand-written rule that PPO then refined, not from the agent
+finding it alone; the +8/+12 gains are outside the training pool (offsets up to +6), so the rule's
+judgment is generalising; and the agent has only ever been doubled by itself, never by an
+opponent, so how it replies to a double (recontra) is untested.
+
+*(b) Does a less saturating reward let the agent find doubling on its own? Partly.* Same run as
+3c (from the clone, same pool, same forced-doubling schedule 0.15 to 0.03) with `reward_scale=96`
+instead of 24 (`TrainConfig.reward_scale`). Two effects, both in the direction of the saturation
+explanation: (i) the agent started choosing doubles by itself, from about iteration 100 and at
+about 1% of chances at best (0.2%, 1.0%, 0.9%, 0.5% over the last four 50-iteration blocks),
+against 16 in the whole 3c run (0.007%); (ii) the forced doubles stopped damaging the agent: its
+profile is about the same as 3b's (table above; +4: 7.5 vs 5.4, +12: 25.7 vs 29.2), where 3c's
+was clearly worse. But the greedy agent still never doubles (evaluation `contra_rate` 0.00 at
+every checkpoint) and the self-initiated doubling fell off as the forcing was annealed, so this
+does not show the agent can discover doubling unaided; it shows the reward scale was part of why
+it could not. Untested: a longer run, a slower anneal, or a larger scale. This run also cannot separate the
+incentive effect from the simpler one that the exploration noise is less harmful at a gentler
+scale.
+
+**After that:** (4) scale up (parallel rollouts, millions of deals); (5) measure signaling: how
+much better the belief head predicts partner's cards after the auction, and whether changing
+partner's bid for the same cards changes the card played; (6) add opponents that double, so the
+agent learns to answer a double; (7) stronger play (solver teacher for endgames) and the
+search-based baseline.
+
+Full project suite passes (`pytest`, 387 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

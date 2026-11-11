@@ -26,6 +26,7 @@ few levels.
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -166,10 +167,18 @@ def collect_imitation_data(
     seed: int,
     noise_prob: float = 0.1,
     auction_noise_prob: float = 0.05,
+    opponents: Sequence[Agent] | None = None,
 ) -> ImitationData:
-    """Play `n_deals` shuffles with `teacher` making every decision, recording one sample per
-    card-play decision and one per auction decision. Aborted deals still contribute their
-    auction samples (the teacher's passes are real, informative examples)."""
+    """Play `n_deals` shuffles, recording one sample per card-play decision and one per auction
+    decision made by the teacher. Aborted deals still contribute their auction samples (the
+    teacher's passes are real, informative examples).
+
+    By default `teacher` makes every decision (all four seats are recorded). With `opponents`, the
+    teacher holds one team and an opponent from the list holds the other (cycling through the list,
+    alternating which team is the teacher's), and only the TEACHER's decisions are recorded; an
+    opponent that is the teacher itself (`opponent is teacher`) is the all-teacher case. Needed to
+    clone behaviour that only comes up against particular opponents, e.g. doubling an over-bidder:
+    a teacher playing only itself rarely meets a bid worth doubling."""
     rng = random.Random(seed)
     obs_rows: list[npt.NDArray[np.float16]] = []
     mask_rows: list[npt.NDArray[np.bool_]] = []
@@ -195,10 +204,22 @@ def collect_imitation_data(
         hands = deal_hands(random.Random(deal_seed(seed + i, 0, 0)), rules)
         deal = Deal(rules, dealer=i % 4, hands=hands, deal_id=0)
         tracked = TrackedDeal(deal)
+        opponent: Agent = teacher
+        teacher_team = 0
+        if opponents:
+            # Not tied to the dealer's parity (`i % 4`), or the teacher would always sit on the
+            # dealer's team.
+            teacher_team = (i // 4) % 2
+            opponent = opponents[(i // 8) % len(opponents)]
+        record_all = opponent is teacher
         while deal.phase in (Phase.AUCTION, Phase.PLAY):
             seat = deal.to_act
             info = info_set(tracked, seat, match_score=(0, 0), deal_number=0)
             mask = legal_mask(info, space)
+            is_teacher_seat = record_all or seat % 2 == teacher_team
+            if not is_teacher_seat:
+                tracked.step(space.decode(opponent.act(info, space, mask)))
+                continue
             action_idx = teacher.act(info, space, mask)
             if info.phase == Phase.PLAY:
                 obs_rows.append(flatten(encode(info)).astype(np.float16))

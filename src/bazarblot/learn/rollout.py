@@ -34,7 +34,7 @@ from bazarblot.env.actions import ActionSpace, legal_mask
 from bazarblot.env.infoset import info_set
 from bazarblot.env.tracked_deal import TrackedDeal
 from bazarblot.learn.belief import belief_target, privileged_features
-from bazarblot.learn.reward import deal_margin_reward
+from bazarblot.learn.reward import SQUASH_SCALE, deal_margin_reward
 
 Opponent = PolicyValueNet | Agent
 
@@ -217,6 +217,7 @@ def collect_rollout(
     bid_agent: Agent | None = None,
     critic: CentralCritic | None = None,
     forced_contra_prob: float = 0.0,
+    reward_scale: float = SQUASH_SCALE,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
 
@@ -231,6 +232,9 @@ def collect_rollout(
     Zero by default (no effect); `learn/train.py` anneals it down over a training run.
 
     `forced_contra_prob` does the same for doubling (contra/recontra) when it is legal.
+
+    `reward_scale` is the `tanh(margin / scale)` squash constant (`learn/reward.py`); larger values
+    saturate later, so large-stakes outcomes (a doubled failure) stay distinguishable.
 
     `bid_agent` (see `_play_one`) takes over all auction decisions so the learner trains on card
     play alone; the forced-exploration probabilities are then moot.
@@ -302,7 +306,7 @@ def collect_rollout(
                 if not seat_transitions:
                     continue
                 margin = margin_team0 if TEAM_OF[seat] == 0 else -margin_team0
-                seat_transitions[-1].reward = deal_margin_reward(margin)
+                seat_transitions[-1].reward = deal_margin_reward(margin, reward_scale)
                 trajectories.append(seat_transitions)
                 all_transitions.extend(seat_transitions)
                 stats.n_transitions += len(seat_transitions)

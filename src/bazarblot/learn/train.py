@@ -43,6 +43,10 @@ class TrainConfig:
     hidden: tuple[int, ...] = (256, 256)
     gamma: float = 1.0
     lam: float = 0.95
+    reward_scale: float = 24.0
+    """Constant in the `tanh(margin / reward_scale)` reward squash (spec §6). 24 is the spec's
+    recommendation; a larger value saturates later. Changing it rescales the value function, so
+    runs with different values are not comparable on loss curves, only on behaviour."""
     ppo: PPOConfig = field(default_factory=PPOConfig)
     entropy_coef_start: float = 0.05
     entropy_coef_end: float = 0.02
@@ -289,6 +293,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             bid_agent=bid_agent,
             critic=critic,
             forced_contra_prob=forced_contra_prob,
+            reward_scale=config.reward_scale,
         )
         t_rollout = time.perf_counter() - t0
 

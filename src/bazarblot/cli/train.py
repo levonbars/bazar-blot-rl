@@ -26,6 +26,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--forced-bid-prob-start", type=float, default=0.4)
     p.add_argument("--forced-bid-prob-end", type=float, default=0.05)
     p.add_argument("--forced-bid-anneal-frac", type=float, default=1.0)
+    p.add_argument("--reward-scale", type=float, default=24.0)
     p.add_argument("--forced-contra-prob-start", type=float, default=0.0)
     p.add_argument("--forced-contra-prob-end", type=float, default=0.0)
     p.add_argument(
@@ -75,6 +76,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         forced_bid_prob_start=args.forced_bid_prob_start,
         forced_bid_prob_end=args.forced_bid_prob_end,
         forced_bid_anneal_frac=args.forced_bid_anneal_frac,
+        reward_scale=args.reward_scale,
         forced_contra_prob_start=args.forced_contra_prob_start,
         forced_contra_prob_end=args.forced_contra_prob_end,
         bid_agent=args.bid_agent,
