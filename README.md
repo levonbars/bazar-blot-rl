@@ -92,7 +92,7 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0 through M7 (first pass) complete.**
+**M0 through M6 complete; M7 in progress (agent does not yet bid).**
 
 The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
 and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
@@ -252,24 +252,28 @@ within about 7 updates** (abort rate 6% → 100%, margin pinned at exactly 0). R
 bonus alone did not fix it; the real fix was scoring a 4-pass abort as its true `margin=0` outcome
 instead of discarding it (an abort genuinely is zero-sum-zero under the rules, so this isn't
 reward shaping) plus seeding the opponent pool with `HeuristicAgent`/`RandomAgent` from iteration
-0 rather than only historical self-play snapshots. With both fixes, an 800-iteration run (~28
-minutes, one CPU core) clears half the milestone's own "done when" bar formally and repeatedly:
-paired evaluation against both baselines, run every 25 iterations via M5's harness, had a CI
-excluding 0 in the agent's favor at all 32 checkpoints (vs `heuristic`: mean margin 67.2, range
-52.8–74.1; vs `random`: mean 205.6, range 151.7–262.3) — stable from the very first checkpoint,
-not a late-training fluke. The `PIMC-20` half of the bar was not attempted (M4 already documented
-why: 160+ full double-dummy solves for PIMC-20's first play decision alone), left as explicit
-future work rather than faked with an unrepresentative sample. One real caveat is also left
-open: the trained agent's own self-play abort rate climbed to 85–92% by the end of training, and
-this run can't distinguish "the policy correctly learned most hands aren't worth opening" from
-"the policy drifted somewhat over-conservative and still wins because the baselines aren't close
-to optimal either" — the natural next diagnostic (M5's DD-oracle bid-accuracy metric against this
-checkpoint) wasn't run in this pass. Full account, including the off-by-one the bid-factoring math
-fixes in the spec's own worked arithmetic, in
+0 rather than only historical self-play snapshots. With both fixes, an 800-iteration run
+passes the formal part of the milestone's "done when" bar: paired evaluation against both
+baselines, run every 25 iterations via M5's harness, had a CI excluding 0 in the agent's favor at
+all 32 checkpoints (vs `heuristic`: mean margin about +66; vs `random`: about +156-206 depending on
+the run).
+
+**But those margins do not mean the agent bids well: it does not bid at all.** A direct check of
+the greedy final checkpoints found 0 declarations in 66 and in 104 completed deals against
+`HeuristicAgent`, and essentially no completed self-play auctions (0 of 100). The agent concedes
+every auction and wins on defense. Fixes tried since: a larger annealed entropy bonus (no effect),
+and forced-bid exploration during rollouts with a permanent floor (keeps sampled bidding alive and
+stable, but the greedy policy still never makes `BID` its top choice). Two infrastructure fixes
+did land: batching the PPO update's forward pass (about 3x on the update; an 800-iteration run now
+takes about 16 minutes) and KL early-stopping (`approx_kl` had reached 1-6). The `PIMC-20` half of
+the bar was not attempted (M4 documented why: 160+ double-dummy solves for PIMC-20's first play
+decision alone). Full account, including the off-by-one the bid-factoring math fixes in the
+spec's own worked arithmetic, in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
 
-Next: auxiliary heads (belief, DD-value, contract-outcome, spec §7.2), the DD-oracle bidding
-diagnostic on this checkpoint, and/or M8's two-phase experiments.
+Next: make the agent actually bid (a higher forced-bid floor, then behavior-cloning the bid heads
+from `HeuristicAgent`), then the DD-oracle bidding diagnostic on a checkpoint that bids; auxiliary
+heads (spec §7.2) and M8's two-phase experiments after that.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

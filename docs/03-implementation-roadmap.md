@@ -737,7 +737,14 @@ Model-free baseline, per spec §7.1(1).
 **Done when:** the learned agent beats `heuristic` with a paired CI excluding 0, and beats
 `PIMC-20` or the gap is measured and explained.
 
-### M7 status: **first run complete, done-when partially met**
+### M7 status: **pipeline built and stable; the agent does not yet bid, so the done-when bar is NOT met in substance**
+
+> **Read this first.** The paired-evaluation numbers below are real, but a follow-up check
+> (section "The agent never bids" at the end of this status) showed they come from a
+> pass-and-defend policy: the greedy final checkpoints of both full runs declared 0 times
+> (0 of 66 and 0 of 104 completed deals) against `HeuristicAgent`. "Beats `heuristic` with a CI excluding 0" is formally true and says nothing
+> about bidding skill. The sections are kept in the order they were written; later sections
+> correct earlier ones.
 
 Built as `src/bazarblot/agents/nn/` (the model: `bid_factor.py`, `network.py`, `ppo_agent.py`) and
 `src/bazarblot/learn/` (the training loop: `reward.py`, `rollout.py`, `ppo.py`, `opponent_pool.py`,
@@ -794,8 +801,8 @@ regression-tested (`tests/test_learn_rollout.py`) and documented at their sites,
 silently.
 
 **A real training run (800 iterations, 128 deals/iteration, `opponent_prob=0.5`, ~28 minutes on
-one CPU core) clears the `heuristic`/`random` half of the Done-when bar, formally and
-repeatedly, not as a one-off:** paired evaluation against both baselines (150 pairs, M5's harness,
+one CPU core) formally clears the `heuristic`/`random` half of the Done-when bar (but see the
+final section: this is pass-and-defend, not bidding skill):** paired evaluation against both baselines (150 pairs, M5's harness,
 bootstrapped CI) ran every 25 iterations, 32 times across the run. Every single one of those 32
 checks had a CI excluding 0 in the agent's favor — vs `heuristic`, margin ranged 52.8 to 74.1
 (mean 67.2) across the run; vs `random`, 151.7 to 262.3 (mean 205.6). This was true from the very
@@ -812,22 +819,60 @@ against the trained agent would multiply that further. This is a real gap agains
 own stated bar, not a silently-dropped requirement — flagged here rather than either faked with an
 unrepresentative tiny sample or quietly skipped.
 
-**A real, unresolved caveat worth stating plainly: the trained agent's own self-play abort rate
-climbed to roughly 85–92% by the end of training**, well above where it started (6%) and — on the
-information available — plausibly higher than a well-calibrated bidder's true optimum. Two
-readings are both consistent with the data, and this run cannot distinguish them: (a) the policy
-has correctly learned that most dealt hands under this ruleset's `min_bid=8` floor genuinely aren't
-worth opening, and two copies of the SAME calibrated policy facing each other therefore pass
-correctly on each other most of the time (self-play margin stays centered near 0 throughout,
-exactly as two evenly-matched opponents should); or (b) the policy has drifted somewhat
-over-conservative in a way that still manages to beat `heuristic`/`random` specifically because
-those baselines are (per M4/M5's own documented findings) not close to optimal bidders themselves,
-without the policy's own bidding being anywhere near optimal in an absolute sense. Distinguishing
-these needs the DD-oracle bid-accuracy metric M5 already built
-(`eval.metrics.evaluate_dd_oracle_metrics`) run against this checkpoint — not done in this pass,
-noted as the natural next diagnostic rather than guessed at.
+**The agent never bids (found by checking, not by the DD-oracle metric).** The paragraph that
+stood here originally flagged a 85-92% self-play abort rate as an open question and proposed M5's
+DD-oracle bid-accuracy metric to resolve it. A much cheaper direct check resolved it first: playing
+the final checkpoint greedily (`sample=False`, what evaluation and real play use), it **declared 0
+times in 66 completed deals against `HeuristicAgent`**, and in pure self-play **0 of 100 deals
+completed** (1 of 100 under sampling). So the +60-70 margin vs `heuristic` and +150-200 vs `random`
+are real but come from conceding every auction and defending; the "beats heuristic" half of the
+done-when bar is satisfied only formally. The DD-oracle run was therefore not worth its cost (it
+needs completed self-play auctions, and there are essentially none); `cli/dd_oracle_eval.py` was
+added so it can be run on a checkpoint that does bid.
 
-Full project suite passes (`pytest`, 330 tests); `ruff check`/`ruff format --check` and `mypy
+**What was tried, in order, and what each showed.** `RolloutStats.learner_declare_rate` (fraction
+of completed opponent-mix deals the learner's team won the auction) was added so this is visible
+during training instead of only afterwards.
+
+1. *Larger, annealed entropy bonus* (0.05 -> 0.02 over the run, `TrainConfig.entropy_coef_*`): did
+   **not** help. `declare_rate` still fell to ~0 within ~10-15 iterations and stayed there
+   (diagnostic stopped at iteration 528 of 800; behavior identical to the un-annealed run).
+2. *Forced-bid exploration* (`forced_bid_prob`, `agents/nn/ppo_agent.py`): during rollout
+   collection only, override the auction's top-level choice to `BID` with some probability, while
+   recording the log-probability under the network's own unbiased distribution so PPO's importance
+   ratio stays correct. Annealed to 0 by 60% of the run, `declare_rate` tracked `forced_bid_prob`
+   almost exactly and fell to ~0 the moment forcing reached 0 (a 50-iteration diagnostic), while
+   `value_loss` and entropy kept moving: the policy keeps learning, just not that bidding pays.
+3. *Same, with a permanent 0.05 floor* (`forced_bid_prob_end=0.05`, annealed over the whole run):
+   sampled `declare_rate` stays 0.4-0.7 for most of training, so the exploration is real, but the
+   **greedy** policy still never declares (0/104 deals vs `heuristic`; 0/100 self-play deals
+   complete). Per-100-iteration mean `declare_rate` was 0.50, 0.70, 0.75, 0.71, 0.69, 0.61, 0.54,
+   0.43; backing out the forcing share (an estimate, not a measurement) puts the organic rate at
+   roughly 0.55 mid-run falling to roughly 0.38 at the end. So the floor slows the slide back toward
+   passing but does not reverse it, and the network never makes `BID` its argmax on any hand.
+
+**Likely mechanism (a hypothesis, not yet tested).** Declaring only pays if the declarer plays well,
+and play skill is learned largely from defending, which needs no bids. Early on, forced bids really
+are losing bets, so the value function correctly learns that; with forcing reduced there is no fresh
+evidence to revise that verdict as play improves. Two further candidates not yet ruled out: credit
+assignment (one terminal reward spread over ~8 play decisions plus one bid decision), and the policy
+head not separating strong from weak hands well enough to flip its top choice anywhere.
+
+**Two infrastructure fixes that came out of this and stand regardless.** (a) `ppo_update` ran one
+network forward pass per transition; it now runs one per minibatch
+(`_recompute_log_prob_from_output`), giving ~3x on the update step (2115 -> ~6300 transitions/s
+measured) and an 800-iteration run in 16.4 minutes instead of ~28. (b) `PPOConfig.target_kl` (0.03)
+early-stops an update once a minibatch's `approx_kl` exceeds it; before this, `approx_kl` had reached
+1-6 (healthy is ~0.01-0.02) once forced bids started injecting low-probability actions, and it has
+stayed in ~0.00-0.03 since. MPS was tried briefly and not pursued: tensors throughout `ppo.py`
+and `ppo_agent.py` are not device-aware, and for a ~260K-parameter MLP the payoff is uncertain.
+
+**Next experiments, cheapest first:** a higher or constant forced-bid floor (~16 minutes per run);
+if the greedy policy still never declares, warm-start the bid heads by behavior-cloning
+`HeuristicAgent`'s bidding before PPO, so bidding starts from a sane prior instead of being
+discovered through losing early bets; then re-run the DD-oracle check on a checkpoint that bids.
+
+Full project suite passes (`pytest`, 339 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same
