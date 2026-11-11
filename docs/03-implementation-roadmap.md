@@ -867,12 +867,49 @@ early-stops an update once a minibatch's `approx_kl` exceeds it; before this, `a
 stayed in ~0.00-0.03 since. MPS was tried briefly and not pursued: tensors throughout `ppo.py`
 and `ppo_agent.py` are not device-aware, and for a ~260K-parameter MLP the payoff is uncertain.
 
-**Next experiments, cheapest first:** a higher or constant forced-bid floor (~16 minutes per run);
-if the greedy policy still never declares, warm-start the bid heads by behavior-cloning
-`HeuristicAgent`'s bidding before PPO, so bidding starts from a sane prior instead of being
-discovered through losing early bets; then re-run the DD-oracle check on a checkpoint that bids.
+**Later results, and the change of plan.**
 
-Full project suite passes (`pytest`, 339 tests); `ruff check`/`ruff format --check` and `mypy
+- *A constant 0.3 forced-bid floor* did not help: the sampled declare rate held at ~0.75 for the
+  whole run, but the greedy policy declared 0 times in 104 deals at every checkpoint tested (100,
+  300, 500, 800) and 0 of 100 self-play auctions completed. A look at 4,695 of the agent's own
+  seat-trajectories showed its bid probability was flat across hand strength (0.56, 0.58, 0.56)
+  and that bidding did not earn less than passing in any strength bucket (e.g. +0.31 vs +0.16
+  mid-strength; the weakest bucket's +0.164 vs +0.146 is within noise). So the problem is not that
+  bidding loses money; one bid decision gets almost no usable signal from a terminal reward shared
+  with ~8 noisy play decisions.
+- *Decision (user, agreed):* stop trying to make joint PPO discover bidding. Train play first, then
+  choose bids by evaluation (spec §7.3, "bid-by-evaluation"), with bidding conventions (bids that
+  tell the partner about the hand) left to emerge from self-play; human conventions come later.
+  `agents/composed.py` and the `--bid-agent heuristic` training mode implement stage 1: the
+  heuristic makes every auction decision and the learner trains on card play only, evaluated
+  against heuristic play under the same bidding.
+- *Stage 1, PPO from scratch:* 800 iterations left card play at random level. Over 30 evaluations
+  (150 pairs each) the learner scored +0.10 against random play on average (CI excluding 0 in
+  4/30) and -1.18 against the heuristic's play (significantly negative in 23/30), with no trend.
+- *Stage 1, behavior-cloned warm start* (`learn/imitation.py`, `cli/imitate.py`): 12,000 deals of
+  the heuristic's card play with 10% injected random plays, 15 epochs: 98.7% held-out agreement
+  with the heuristic's card. Under identical heuristic bidding, 300 pairs: +0.34 vs heuristic play
+  (CI -0.18 to +1.03, i.e. at its level) and +2.05 vs random play (CI +1.11 to +3.11). The belief
+  head (`learn/belief.py`, per unseen card, which other seat holds it) reached 0.49 accuracy
+  against 0.33 for chance.
+- *Stage 1, PPO fine-tune of the clone* (400 iterations, lr 1e-4, entropy bonus 0.005 -> 0.001,
+  belief weight 0.2, 20 value-only warm-up iterations): it kept heuristic-level play but did not
+  improve on it. Over 16 evaluations (300 pairs each) the margin vs heuristic play averaged -0.14
+  (range -0.50 to +0.17; CI excluding 0 in our favour in 0/16, against us in 2/16; by quarter
+  -0.06, -0.08, -0.23, -0.20). Against random play it averaged +1.14 (CI above 0 in 15/16). Policy
+  entropy drifted up from 0.02 to ~0.08, KL stayed ~0.003-0.007.
+- *Reading, partly hypothesis:* under identical bidding, card play moves the margin by only about
+  1-2 points (the heuristic beats random play by roughly that), against a per-pair standard
+  deviation near 11, so a play-only terminal reward is a very weak training signal. That PPO
+  holds the clone's level but cannot improve it fits this, but it does not prove it; a
+  double-dummy teacher for endgame positions (cheap late in the deal) is the obvious next lever
+  if stronger play is needed.
+- *Consequence for the plan:* the behavior-cloned player (heuristic-level play, a belief head, a
+  warmed-up value head) is a sufficient play policy for stage 2: a bid-value model trained from
+  paired counterfactual rollouts (the same deal replayed with different bids, which cancels deal
+  luck). Stronger play can be pursued in parallel and swapped in later.
+
+Full project suite passes (`pytest`, 373 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

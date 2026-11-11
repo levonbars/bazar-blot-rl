@@ -271,9 +271,14 @@ decision alone). Full account, including the off-by-one the bid-factoring math f
 spec's own worked arithmetic, in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
 
-Next: make the agent actually bid (a higher forced-bid floor, then behavior-cloning the bid heads
-from `HeuristicAgent`), then the DD-oracle bidding diagnostic on a checkpoint that bids; auxiliary
-heads (spec §7.2) and M8's two-phase experiments after that.
+**Current direction (agreed):** stop making joint PPO discover bidding. Train card play first
+under a fixed heuristic bidder, then choose bids by evaluation (a value model built from paired
+counterfactual replays of the same deal with different bids), and let bidding conventions (bids that
+tell the partner about the hand) emerge from self-play; human conventions come later. So far: a
+behavior-cloned player reaches heuristic-level card play (PPO from scratch stayed at random level,
+and PPO fine-tuning of the clone held but did not improve it), and a belief head predicts the
+unseen cards (0.49 accuracy vs 0.33 chance), which is also how we will measure what the bids
+convey. Next: the bid-value model and bid-by-evaluation, then measuring the information bids carry.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this
