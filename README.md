@@ -278,8 +278,9 @@ made 11% of its contracts, and against it conceding every auction really was the
 Fixed (`OBS_VERSION` is now `v2`): the heuristic now makes 90% of its contracts, declaring is worth
 +16.5 points per deal, and it beats an always-pass bidder by +12 (`python -m
 bazarblot.cli.baselines`). Everything trained or measured before that fix is against a broken
-opponent. Direction: clone the fixed heuristic's bidding and play, train bidding and play together
-in self-play, scale up, and measure how bids signal to the partner as that emerges (the belief
+opponent. Direction: clone the fixed heuristic's bidding and play (done: the cloned network
+reproduces the heuristic's behaviour, 98% card and 98.5% pass-or-bid agreement, same contract and
+make rates), train bidding and play together in self-play, scale up, and measure how bids signal to the partner as that emerges (the belief
 head predicts the unseen cards; the question is how much better it does after hearing the
 auction). Human conventions come later. Full account in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.

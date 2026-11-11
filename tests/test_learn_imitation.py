@@ -12,11 +12,15 @@ torch = pytest.importorskip("torch")
 import numpy as np  # noqa: E402
 
 from bazarblot.agents.heuristic import HeuristicAgent  # noqa: E402
-from bazarblot.agents.nn.network import build_network  # noqa: E402
+from bazarblot.agents.nn.network import META_BID, META_PASS, build_network  # noqa: E402
 from bazarblot.core.rules import load_default  # noqa: E402
 from bazarblot.env.actions import build_action_space  # noqa: E402
 from bazarblot.learn.belief import IGNORE  # noqa: E402
-from bazarblot.learn.imitation import behavior_clone, collect_imitation_data  # noqa: E402
+from bazarblot.learn.imitation import (  # noqa: E402
+    NO_LABEL,
+    behavior_clone,
+    collect_imitation_data,
+)
 
 RULES = load_default()
 SPACE = build_action_space(RULES)
@@ -57,3 +61,58 @@ def test_behavior_clone_learns_the_teacher() -> None:
     stats = behavior_clone(net, data, epochs=12, batch_size=256, verbose=False)
     # Untrained, a legal-masked guess among ~4-8 cards is well under 0.5.
     assert stats.holdout_card_acc > 0.6
+
+
+def test_auction_labels_are_legal_under_the_sampler_masks() -> None:
+    """Every auction sample's label must be a legal choice under the exact masks the sampler and
+    PPO use, factor by factor (meta, then delta, type given delta, capot given delta and type)."""
+    for noise in (0.0, 0.5):
+        data = collect_imitation_data(
+            RULES, SPACE, HeuristicAgent(RULES), n_deals=60, seed=2, auction_noise_prob=noise
+        )
+        m = data.n_auction
+        assert m > 100
+        rows = np.arange(m)
+        assert data.a_meta_mask[rows, data.a_meta].all()
+        is_bid = data.a_meta == META_BID
+        assert is_bid.any() and (~is_bid).any()
+        b = rows[is_bid]
+        assert data.a_delta_mask[b, data.a_delta[b]].all()
+        assert data.a_type_mask[b, data.a_type[b]].all()
+        assert data.a_capot_mask[b, data.a_capot[b]].all()
+        nb = rows[~is_bid]
+        assert (data.a_delta[nb] == NO_LABEL).all()
+        assert (data.a_type[nb] == NO_LABEL).all()
+        assert (data.a_capot[nb] == NO_LABEL).all()
+
+
+def test_the_teacher_only_passes_or_bids() -> None:
+    """The fixed heuristic never doubles, so noise-free labels have no CONTRA/RECONTRA."""
+    data = collect_imitation_data(
+        RULES, SPACE, HeuristicAgent(RULES), n_deals=60, seed=2, auction_noise_prob=0.0
+    )
+    assert set(np.unique(data.a_meta)) <= {META_PASS, META_BID}
+
+
+def test_cloned_network_actually_bids_and_completes_auctions() -> None:
+    """Regression test for the original M7 failure: agents trained against the broken heuristic
+    learned to concede every auction (0 declarations, 0 completed self-play auctions). A network
+    cloned from the fixed heuristic must bid, declare and reach contracts."""
+    import random
+
+    from bazarblot.agents.nn.ppo_agent import NNAgent
+    from bazarblot.eval.behavior import evaluate_behavior
+
+    torch.manual_seed(0)
+    teacher = HeuristicAgent(RULES)
+    data = collect_imitation_data(RULES, SPACE, teacher, n_deals=500, seed=0)
+    net = build_network(RULES)
+    behavior_clone(net, data, epochs=8, batch_size=256, verbose=False)
+    net.eval()
+
+    rng = random.Random(1)
+    seeds = [rng.randrange(1 << 30) for _ in range(20)]
+    dealers = [rng.randrange(4) for _ in range(20)]
+    report = evaluate_behavior(RULES, SPACE, NNAgent(net, sample=False), teacher, seeds, dealers)
+    assert report.declare_rate is not None and report.declare_rate > 0.1
+    assert report.selfplay_contract_rate > 0.3

@@ -938,8 +938,8 @@ self-play contract rate) are now standard: every learned agent is checked agains
 its behaviour is logged at each evaluation, so a margin earned by conceding auctions cannot pass
 as skill again.
 
-**Plan from here:** (1) done: fix the units bug and re-measure. (2) Clone the fixed heuristic for
-bidding as well as play, so exploration starts from sane bids. (3) Train bidding and play together
+**Plan from here:** (1) done: fix the units bug and re-measure. (2) done, see below: clone the fixed
+heuristic for bidding as well as play, so exploration starts from sane bids. (3) Train bidding and play together
 in self-play with a value estimate that sees all four hands during training only, against itself,
 the fixed heuristic and the always-pass bidder. (4) Scale up (parallel rollouts, millions of
 deals). (5) Measure signaling as it emerges: how much better the belief head predicts partner's
@@ -947,7 +947,29 @@ cards after the auction, and whether changing partner's bid for the same cards c
 played. (6) Strengthen play (solver teacher for endgames) and test against the search agent;
 human conventions come after that.
 
-Full project suite passes (`pytest`, 361 tests); `ruff check`/`ruff format --check` and `mypy
+**Step 2 result: a network cloned from the fixed heuristic bids and plays like it.**
+`learn/imitation.py` now clones auction decisions as well as card play. Bids are trained factor by
+factor under the same legality masks the sampler and PPO use (pass/double/bid, then raise size,
+then suit given raise, then capot), the belief head is fitted on both phases, and the executed
+auction action is occasionally a mild random one (a pass or a raise of at most 4 levels; a
+uniformly random legal auction action is almost always an absurd high bid) while the label stays
+the teacher's. 20,000 deals, 20 epochs, `python -m bazarblot.cli.imitate`:
+
+- Held-out agreement with the teacher: card 98.3%, pass-vs-bid 98.5%, exact bid level 85.2%, bid
+  suit 94.7%; belief accuracy 0.48 (chance 0.33).
+- Behaviour against the heuristic (133 shuffles, both seatings), clone vs heuristic-against-itself:
+  contract reached 0.78 vs 0.79, clone's team declares 0.47 vs 0.50, contracts made 0.90 vs 0.90,
+  all-four-seats self-play reaches a contract 0.77 vs 0.79.
+- Paired margins, clone over Y (400 pairs): vs heuristic -0.4 (CI -1.0 to +0.1, level); vs
+  always-pass + heuristic play +12.8 (CI +11.6 to +13.9; the heuristic itself gets +12.2); vs
+  random +113.0 (heuristic: +111.2).
+
+This is the opposite of the earlier failure (0 declarations, no completed self-play auctions) and
+is guarded by a regression test (`test_cloned_network_actually_bids_and_completes_auctions`).
+The clone is a copy, so it is not expected to beat the heuristic; it is the starting point for
+step 3 (joint self-play). `OBS_VERSION` v2 checkpoints from this step are in `checkpoints/m7_bc2/`.
+
+Full project suite passes (`pytest`, 364 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same
