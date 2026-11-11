@@ -43,8 +43,16 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument(
         "--opponents",
         default="heuristic,random",
-        help="comma-separated fixed training opponents from: heuristic, random, passer",
+        help="comma-separated fixed training opponents: heuristic, heuristic@K (bid offset K), "
+        "random, passer, clone",
     )
+    p.add_argument(
+        "--heldout-offsets",
+        default="",
+        help="comma-separated heuristic bid offsets to report a generalisation profile on "
+        "(keep disjoint from the offsets in --opponents)",
+    )
+    p.add_argument("--heldout-pairs", type=int, default=100)
     p.add_argument("--opponent-prob", type=float, default=0.3)
     p.add_argument("--snapshot-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=20)
@@ -68,6 +76,8 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         bid_agent=args.bid_agent,
         central_critic=args.central_critic,
         baseline_opponents=tuple(args.opponents.split(",")),
+        heldout_offsets=tuple(int(x) for x in args.heldout_offsets.split(",") if x),
+        heldout_pairs=args.heldout_pairs,
         opponent_prob=args.opponent_prob,
         snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,

@@ -1012,12 +1012,55 @@ margin against a fixed opponent in the training pool is therefore the wrong succ
 Going forward the criterion is the held-out profile (and self-play quality), not a single margin.
 Signaling was not examined in this step.
 
-**Next (step 3b, then 4):** widen the training pool so over-bidding is punished and timid bidding
-is not the only thing to exploit: heuristic variants across the `bid_offset` range, the clone and
-earlier snapshots, with more weight on self-play; gate runs on the robustness profile; then scale
-up (parallel rollouts, millions of deals) before measuring signaling.
+**Step 3b result: a wider opponent pool fixes most of the over-fitting.** Same run as step 3
+(identical settings, 300 iterations of 256 deals), changing only who it trains against: heuristics
+at bid offsets -4, -2, 0, +1, +3, +6, the always-pass bidder, a frozen copy of the clone, and
+snapshots of earlier versions (half of all deals; the other half pure self-play). Held-out styles
+(never in the pool) are -3, -1, +2, +4, +8; the full test below also uses -6 and +12, which lie
+outside the training range. Fresh seeds, 300 pairs per cell, margin of agent over that opponent
+(`python -m bazarblot.cli.robustness`):
 
-Full project suite passes (`pytest`, 375 tests); `ruff check`/`ruff format --check` and `mypy
+| heuristic bid_offset | -6 | -3 | -1 | 0 | +2 | +4 | +8 | +12 |
+|---|---|---|---|---|---|---|---|---|
+| clone (start) | +7.8 | +4.1 | +0.6 | -0.4 | +0.7 | +7.9 | +26.0 | +33.9 |
+| step 3 (heuristic + passer only) | +7.8 | +7.1 | +5.3 | +4.2 | +1.7 | +2.1 | +12.5 | +22.1 |
+| step 3b (wide pool) | +8.2 | +7.4 | +6.1 | +5.4 | +2.7 | +5.4 | +20.2 | +29.2 |
+
+- 3b is at least as good as step 3 in every column and clearly better against the over-bidders
+  (+8: 20.2 vs 12.5; +12: 29.2 vs 22.1; +4: 5.4 vs 2.1). Every one of the eight CIs excludes 0 in
+  its favour (lowest: +2.7, CI +1.0 to +4.5, at offset +2); the clone is level or negative at
+  -1, 0 and +2 and step 3's lower bound at +2 and +4 touches 0.
+- Against bidders at offsets -3 to 0 it beats the clone by 3 to 6 points (level at -6, +2 points
+  at +2). Against the over-bidders
+  the clone is still ahead (+4: 7.9 vs 5.4; +8: 26.0 vs 20.2; +12: 33.9 vs 29.2), because the
+  clone simply lets them fail while the trained agent keeps contesting.
+- It is a contester: all-four-seats self-play reaches a contract in 100% of deals, only 69% of
+  those contracts are made, declaring is worth +7.8 per deal (clone: +16.7), median bid 12 (clone
+  10). Against the training heuristic it declares in ~86% of contested deals and makes ~0.8. Whether
+  contesting everything is good or just exploits non-fighting opponents is not settled by these
+  numbers; self-play against its own earlier snapshots is the available check and is in the pool.
+- The in-pool margin is unchanged (+5.0 against the reference heuristic at iteration 300; vs
+  always-pass +9.5), as it should be: the improvement is in what was NOT being trained on.
+- The "best by held-out profile" checkpoint (`best_profile.pt`, iteration 125) is no better than
+  the final one on fresh seeds, so selecting on noisy in-run evaluations adds nothing here.
+
+**Doubling is never used, by the clone or by the trained agent.** Against the reckless heuristic
+(offset +8) a contra is legal in 802 of the agent's 1,115 auction decisions and it chose it 0
+times (also 0 for the clone). The teacher never doubled, so every cloned example says "pass" in
+those states and the policy gives doubling near-zero probability, and PPO cannot learn the value of
+an action it essentially never tries. Doubling an opponent's failing bid is the direct way to punish
+over-bidding (and doubling also multiplies the stakes of a failure), so it is the obvious missing
+tool: the agent can currently only respond to an over-bid by out-bidding it or conceding.
+
+**Next:** (3c) give the agent a way to discover doubling: exploration of the contra/recontra
+actions when legal during rollouts (log-probabilities still scored under the network's own
+distribution, like the forced-bid mechanism), or a teacher that doubles by a simple rule, then
+re-run the held-out profile. (4) Scale up (parallel rollouts, millions of deals) once the
+profile is healthy. (5) Measure signaling: how much better the belief head predicts partner's cards
+after the auction, and whether changing partner's bid for the same cards changes the card played.
+(6) Stronger play (solver teacher for endgames) and the search-based baseline.
+
+Full project suite passes (`pytest`, 377 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

@@ -25,7 +25,7 @@ from bazarblot.agents.nn.ppo_agent import NNAgent
 from bazarblot.agents.pass_bidder import PassBidder
 from bazarblot.agents.random_agent import RandomAgent
 from bazarblot.core.rules import RuleConfig, load_default
-from bazarblot.env.actions import build_action_space
+from bazarblot.env.actions import ActionSpace, build_action_space
 from bazarblot.eval.behavior import evaluate_behavior
 from bazarblot.eval.metrics import evaluate_pairs
 from bazarblot.learn.checkpoint import critic_from_payload, load_checkpoint, save_checkpoint
@@ -68,8 +68,15 @@ class TrainConfig:
     sees what the critic sees."""
     critic_hidden: tuple[int, ...] = (256, 256)
     baseline_opponents: tuple[str, ...] = ("heuristic", "random")
-    """Fixed opponents always in the training pool: any of `heuristic`, `random`, and `passer`
-    (an always-pass bidder with heuristic card play)."""
+    """Fixed opponents always in the training pool. Any of: `heuristic`; `heuristic@K` (the same
+    heuristic with every bid target shifted by K levels, K<0 timid, K>0 aggressive); `random`;
+    `passer` (always-pass bidder with heuristic card play); `clone` (a frozen copy of
+    `init_checkpoint`, i.e. the network training started from)."""
+    heldout_offsets: tuple[int, ...] = ()
+    """If non-empty, every evaluation also plays the agent against heuristics at these bid offsets
+    and logs the profile. Keep them DISJOINT from the offsets used in `baseline_opponents`, or the
+    profile measures training opponents instead of generalisation."""
+    heldout_pairs: int = 100
     opponent_prob: float = 0.3
     pool_max_size: int = 8
     snapshot_every: int = 20
@@ -148,6 +155,61 @@ def _log_eval(writer: SummaryWriter, tag: str, report: object, iteration: int) -
     )
 
 
+def _build_opponent(
+    name: str,
+    rules: RuleConfig,
+    config: TrainConfig,
+    heuristic_agent: Agent,
+    random_agent: Agent,
+    passer_agent: Agent,
+) -> Opponent:
+    """Resolve one `TrainConfig.baseline_opponents` entry to an opponent."""
+    if name == "heuristic":
+        return heuristic_agent
+    if name == "random":
+        return random_agent
+    if name == "passer":
+        return passer_agent
+    if name.startswith("heuristic@"):
+        try:
+            offset = int(name.split("@", 1)[1])
+        except ValueError:
+            raise ValueError(f"bad heuristic offset in opponent {name!r}") from None
+        return HeuristicAgent(rules, bid_offset=offset)
+    if name == "clone":
+        if config.init_checkpoint is None:
+            raise ValueError("opponent 'clone' needs init_checkpoint (it is a frozen copy of it)")
+        frozen, _ = load_checkpoint(config.init_checkpoint, rules)
+        frozen.eval()
+        for p in frozen.parameters():
+            p.requires_grad_(False)
+        return frozen
+    raise ValueError(
+        f"unknown baseline opponents [{name!r}]; expected heuristic, heuristic@K, random, "
+        "passer or clone"
+    )
+
+
+def _heldout_profile(
+    rules: RuleConfig,
+    space: ActionSpace,
+    agent: Agent,
+    offsets: tuple[int, ...],
+    seeds: list[int],
+    dealers: list[int],
+) -> dict[int, float]:
+    """Paired margin of `agent` over `HeuristicAgent(bid_offset=k)` for each held-out offset."""
+    profile: dict[int, float] = {}
+    for k in offsets:
+        opponent = HeuristicAgent(rules, bid_offset=k)
+        try:
+            report = evaluate_pairs(rules, space, seeds, dealers, agent, opponent, n_resamples=500)
+        except RuntimeError:  # every pair aborted: nobody ever bid
+            continue
+        profile[k] = report.margin.mean
+    return profile
+
+
 def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     rules = rules if rules is not None else load_default()
     space = build_action_space(rules)
@@ -182,19 +244,16 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     # still-randomly-initialized seats can collapse to a degenerate "everyone always passes"
     # equilibrium within a handful of updates, and a fixed baseline that reliably contests
     # auctions is what breaks that symmetry.
-    available: dict[str, Agent] = {
-        "heuristic": heuristic_agent,
-        "random": random_agent,
-        "passer": ComposedAgent(PassBidder(), heuristic_agent),
-    }
-    unknown = [name for name in config.baseline_opponents if name not in available]
-    if unknown:
-        raise ValueError(f"unknown baseline opponents {unknown}; expected from {sorted(available)}")
-    baseline_opponents: list[Opponent] = [available[name] for name in config.baseline_opponents]
+    passer_agent: Agent = ComposedAgent(PassBidder(), heuristic_agent)
+    baseline_opponents: list[Opponent] = [
+        _build_opponent(name, rules, config, heuristic_agent, random_agent, passer_agent)
+        for name in config.baseline_opponents
+    ]
     if config.bid_agent not in (None, "heuristic"):
         raise ValueError(f"unknown bid_agent {config.bid_agent!r}; expected None or 'heuristic'")
     bid_agent = heuristic_agent if config.bid_agent == "heuristic" else None
 
+    best_score = float("-inf")
     for iteration in range(config.n_iterations):
         forced_bid_prob = _forced_bid_prob_at(iteration, config)
         t0 = time.perf_counter()
@@ -287,7 +346,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                         seeds,
                         dealers,
                         nn_agent,
-                        available["passer"],
+                        passer_agent,
                         n_resamples=2000,
                     )
                 except RuntimeError:
@@ -312,6 +371,38 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                 writer.add_scalar("behavior/made_rate", behavior.made_rate, iteration)
             _log_eval(writer, "vs_random", report_vs_random, iteration)
             _log_eval(writer, "vs_heuristic", report_vs_heuristic, iteration)
+            if config.heldout_offsets:
+                profile = _heldout_profile(
+                    rules,
+                    space,
+                    nn_agent,
+                    config.heldout_offsets,
+                    seeds[: config.heldout_pairs],
+                    dealers[: config.heldout_pairs],
+                )
+                if profile:
+                    # The score also counts the in-pool heuristic, so "best" cannot be won by
+                    # trading it away for the held-out styles.
+                    score = float(np.mean([*profile.values(), report_vs_heuristic.margin.mean]))
+                    cells = "  ".join(f"{k:+d}:{m:+.1f}" for k, m in sorted(profile.items()))
+                    print(
+                        f"  [profile vs heuristic bid_offset] {cells}  | mean "
+                        f"{float(np.mean(list(profile.values()))):+.2f}, min "
+                        f"{min(profile.values()):+.1f}, score {score:+.2f}"
+                    )
+                    writer.add_scalar(
+                        "profile/mean", float(np.mean(list(profile.values()))), iteration
+                    )
+                    writer.add_scalar("profile/min", min(profile.values()), iteration)
+                    if score > best_score:
+                        best_score = score
+                        save_checkpoint(
+                            config.checkpoint_dir / "best_profile.pt",
+                            net,
+                            rules,
+                            extra={"iteration": iteration + 1, "profile_score": score},
+                            critic=critic,
+                        )
             net.train()
 
             save_checkpoint(

@@ -162,3 +162,59 @@ def test_train_rejects_unknown_baseline_opponent(tmp_path) -> None:  # type: ign
     )
     with pytest.raises(ValueError, match="unknown baseline opponents"):
         train(config, rules=RULES)
+
+
+def test_build_opponent_resolves_styles_and_rejects_bad_names(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from bazarblot.agents.heuristic import HeuristicAgent
+    from bazarblot.agents.nn.network import PolicyValueNet, build_network
+    from bazarblot.learn.checkpoint import save_checkpoint
+    from bazarblot.learn.train import _build_opponent
+
+    heuristic = HeuristicAgent(RULES)
+    kw = {"heuristic_agent": heuristic, "random_agent": heuristic, "passer_agent": heuristic}
+
+    cfg = TrainConfig()
+    timid = _build_opponent("heuristic@-4", RULES, cfg, **kw)
+    assert isinstance(timid, HeuristicAgent) and timid.bid_offset == -4
+    aggressive = _build_opponent("heuristic@+6", RULES, cfg, **kw)
+    assert isinstance(aggressive, HeuristicAgent) and aggressive.bid_offset == 6
+    assert _build_opponent("heuristic", RULES, cfg, **kw) is heuristic
+
+    with pytest.raises(ValueError, match="bad heuristic offset"):
+        _build_opponent("heuristic@fast", RULES, cfg, **kw)
+    with pytest.raises(ValueError, match="unknown baseline opponents"):
+        _build_opponent("nonsense", RULES, cfg, **kw)
+    with pytest.raises(ValueError, match="needs init_checkpoint"):
+        _build_opponent("clone", RULES, cfg, **kw)
+
+    init = tmp_path / "init.pt"
+    save_checkpoint(init, build_network(RULES), RULES, extra={"iteration": 0})
+    frozen = _build_opponent("clone", RULES, TrainConfig(init_checkpoint=init), **kw)
+    assert isinstance(frozen, PolicyValueNet)
+    assert not any(p.requires_grad for p in frozen.parameters())
+
+
+def test_train_with_style_pool_and_heldout_profile_saves_best_checkpoint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from bazarblot.agents.nn.network import build_network
+    from bazarblot.learn.checkpoint import save_checkpoint
+
+    init = tmp_path / "init.pt"
+    save_checkpoint(init, build_network(RULES), RULES, extra={"iteration": 0})
+    config = TrainConfig(
+        n_iterations=2,
+        n_deals_per_iter=8,
+        ppo=PPOConfig(epochs=1, minibatch_size=32),
+        init_checkpoint=init,
+        central_critic=True,
+        baseline_opponents=("heuristic@-2", "heuristic@3", "passer", "clone"),
+        heldout_offsets=(2, 4),
+        heldout_pairs=3,
+        opponent_prob=0.6,
+        snapshot_every=10,
+        eval_every=1,
+        eval_n_pairs=3,
+        checkpoint_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    train(config, rules=RULES)
+    assert (tmp_path / "checkpoints" / "best_profile.pt").exists()
