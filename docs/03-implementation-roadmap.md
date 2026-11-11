@@ -909,7 +909,7 @@ and `ppo_agent.py` are not device-aware, and for a ~260K-parameter MLP the payof
   paired counterfactual rollouts (the same deal replayed with different bids, which cancels deal
   luck). Stronger play can be pursued in parallel and swapped in later.
 
-Full project suite passes (`pytest`, 373 tests); `ruff check`/`ruff format --check` and `mypy
+Full project suite passes (`pytest`, 354 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same
