@@ -58,3 +58,31 @@ def test_forward_shapes_and_determinism() -> None:
     assert out1["belief"].shape == (3, 32, 3)
     for key in out1:
         assert torch.equal(out1[key], out2[key])
+
+
+def test_action_prior_sets_only_auction_head_biases() -> None:
+    import torch
+
+    from bazarblot.agents.nn.network import META_CONTRA, META_RECONTRA, apply_action_prior
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    before = {k: v.clone() for k, v in net.state_dict().items()}
+    apply_action_prior(net, raise_decay=0.5, capot_bias=-4.0, double_bias=-3.0)
+    after = net.state_dict()
+    changed = {k for k in before if not torch.equal(before[k], after[k])}
+    assert changed == {"delta_head.bias", "capot_head.bias", "meta_head.bias"}
+    bias = net.delta_head.bias
+    assert bias[0] == 0.0 and torch.all(bias[1:] < bias[:-1])  # smaller raises likelier
+    assert net.capot_head.bias.tolist() == [0.0, -4.0]
+    assert net.meta_head.bias[META_CONTRA] == -3.0 == net.meta_head.bias[META_RECONTRA]
+
+
+def test_outcome_head_shape() -> None:
+    import torch
+
+    from bazarblot.agents.nn.network import N_OUTCOMES
+
+    net = build_network(RULES)
+    out = net(torch.zeros(4, OBS_DIM))
+    assert out["outcome"].shape == (4, N_OUTCOMES)

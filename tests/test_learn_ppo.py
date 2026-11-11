@@ -207,3 +207,26 @@ def test_kl_stop_ignores_forced_exploratory_actions() -> None:
 
     counted = ppo_update(net, SPACE, perturbed(False), optimizer, config)
     assert counted.value_loss == 0.0 and counted.policy_loss == 0.0  # stopped immediately
+
+
+def test_outcome_coef_trains_the_outcome_head() -> None:
+    """With `outcome_coef` on, repeated updates on a fixed batch lower the outcome loss."""
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    transitions, _ = collect_rollout(RULES, SPACE, net, n_deals=15, seed=0)
+    optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+    config = PPOConfig(
+        epochs=1,
+        minibatch_size=len(transitions),
+        policy_coef=0.0,
+        entropy_coef=0.0,
+        outcome_coef=1.0,
+        target_kl=None,
+    )
+    losses = [
+        ppo_update(net, SPACE, transitions, optimizer, config).outcome_loss for _ in range(20)
+    ]
+    assert losses[0] > 0.0
+    assert losses[-1] < losses[0] * 0.7
+    off = ppo_update(net, SPACE, transitions, optimizer, PPOConfig(epochs=1, minibatch_size=64))
+    assert off.outcome_loss == 0.0

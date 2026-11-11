@@ -24,10 +24,18 @@ import numpy.typing as npt
 import torch
 
 from bazarblot.agents.base import Agent
-from bazarblot.agents.nn.network import CentralCritic, PolicyValueNet
+from bazarblot.agents.nn.network import (
+    OUTCOME_ABORT,
+    OUTCOME_THEY_FAIL,
+    OUTCOME_THEY_MAKE,
+    OUTCOME_WE_FAIL,
+    OUTCOME_WE_MAKE,
+    CentralCritic,
+    PolicyValueNet,
+)
 from bazarblot.agents.nn.ppo_agent import Decision, decide
 from bazarblot.core.cards import TEAM_OF
-from bazarblot.core.deal import Deal, Phase
+from bazarblot.core.deal import Deal, DealResult, Phase
 from bazarblot.core.dealing import deal_hands, deal_seed
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import ActionSpace, legal_mask
@@ -45,6 +53,9 @@ class Transition:
     belief_target: npt.NDArray[np.int8] | None = None
     """Ground-truth holder of every unseen card at this decision (`learn/belief.py`), computed
     from the deal in rollout code -- training-only, never part of the policy's input."""
+    outcome_target: int = -1
+    """How the deal ended from this seat's view (`OUTCOME_*` in `agents/nn/network.py`), filled in
+    once the deal is over; -1 = no label. Training-only, like `belief_target`."""
     value: float = 0.0
     """Baseline used for the advantage: the actor's own value head by default, or the centralized
     critic's estimate when one is supplied to `collect_rollout`."""
@@ -98,7 +109,13 @@ class RolloutStats:
     n_opponent_deals: int = 0
     n_contested_completed: int = 0
     n_learner_declared_contested: int = 0
+    n_capped: int = 0
+    """Auctions stopped by the engine's `max_auction_steps` safety cap (scored as aborts)."""
     raw_margins: list[float] = field(default_factory=list)
+    selfplay_levels: list[int] = field(default_factory=list)
+    """Contract level of every completed pure-self-play deal (all four seats the learner)."""
+    n_selfplay_made: int = 0
+    n_selfplay_doubled: int = 0
 
     @property
     def learner_declare_rate(self) -> float | None:
@@ -127,15 +144,18 @@ def _play_one(
     forced_bid_prob: float = 0.0,
     bid_agent: Agent | None = None,
     forced_contra_prob: float = 0.0,
-) -> tuple[dict[int, list[Transition]], float, bool, int | None]:
+) -> tuple[dict[int, list[Transition]], float, bool, DealResult | None, bool]:
     """Play one deal; `seat_actors[seat]` decides seat `seat`'s actions -- either `learner`
     itself, a frozen `PolicyValueNet` snapshot from the opponent pool, or an arbitrary `Agent`
     (a fixed baseline like `HeuristicAgent`, see `collect_rollout`'s docstring on why the pool
     can hold both). Returns `(transitions by learner seat, unsquashed margin for team 0,
-    aborted, attackers_team)` -- `attackers_team` is `None` when the deal aborted (no contract to
-    have an attacking team at all). `forced_bid_prob` is applied only to the LEARNER's own
-    auction decisions (see `agents/nn/ppo_agent.py::_auction_decision`) -- opponents play
-    unperturbed, exactly as they would for real.
+    aborted, result, capped)` -- `result` is `None` when the deal aborted (no contract at all).
+    `capped` is True when the auction hit the engine's `max_auction_steps` safety cap: an
+    untrained network that bids about half the time can keep an auction circling, and that is
+    scored as an abort (margin 0) rather than crashing the run; `RolloutStats.n_capped` makes it
+    visible. `forced_bid_prob` is applied only to the LEARNER's own auction decisions (see
+    `agents/nn/ppo_agent.py::_auction_decision`) -- opponents play unperturbed, exactly as
+    they would for real.
 
     `bid_agent`, when given, makes EVERY auction decision for EVERY seat (learner and opponents
     alike) and no auction transition is recorded: the learner is trained on card play only, under
@@ -166,6 +186,11 @@ def _play_one(
     }
 
     while deal.phase in (Phase.AUCTION, Phase.PLAY):
+        if (
+            deal.phase == Phase.AUCTION
+            and len(tracked.auction_log) >= rules.auction.max_auction_steps
+        ):
+            return transitions, 0.0, True, None, True
         seat = deal.to_act
         info = info_set(tracked, seat, match_score=(0, 0), deal_number=0)
         mask = legal_mask(info, space)
@@ -197,10 +222,19 @@ def _play_one(
         tracked.step(space.decode(action_idx))
 
     if deal.phase == Phase.ABORTED:
-        return transitions, 0.0, True, None
+        return transitions, 0.0, True, None, False
     assert deal.result is not None
     team0, team1 = deal.result.team_scores
-    return transitions, float(team0 - team1), False, deal.result.attackers_team
+    return transitions, float(team0 - team1), False, deal.result, False
+
+
+def outcome_label(seat: int, result: DealResult | None) -> int:
+    """The contract-outcome class of a finished deal from `seat`'s point of view."""
+    if result is None:
+        return OUTCOME_ABORT
+    if TEAM_OF[seat] == result.attackers_team:
+        return OUTCOME_WE_MAKE if result.made else OUTCOME_WE_FAIL
+    return OUTCOME_THEY_MAKE if result.made else OUTCOME_THEY_FAIL
 
 
 def collect_rollout(
@@ -282,7 +316,7 @@ def collect_rollout(
             seat_assignments = ({0: learner, 1: learner, 2: learner, 3: learner},)
 
         for seat_actors in seat_assignments:
-            transitions, margin_team0, aborted, attackers_team = _play_one(
+            transitions, margin_team0, aborted, result, capped = _play_one(
                 rules,
                 space,
                 deal_seed_value,
@@ -294,12 +328,18 @@ def collect_rollout(
                 forced_contra_prob,
             )
             stats.n_deals += 1
+            stats.n_capped += int(capped)
+            if result is not None and not use_opponent:
+                stats.selfplay_levels.append(result.contract.level)
+                stats.n_selfplay_made += int(result.made)
+                stats.n_selfplay_doubled += int(result.contract.doubling != "none")
             if aborted:
                 stats.n_aborted += 1
             elif use_opponent:
+                assert result is not None
                 stats.n_contested_completed += 1
                 learner_team = 0 if seat_actors[0] is learner else 1
-                if attackers_team == learner_team:
+                if result.attackers_team == learner_team:
                     stats.n_learner_declared_contested += 1
             stats.raw_margins.append(margin_team0)
             for seat, seat_transitions in transitions.items():
@@ -307,6 +347,9 @@ def collect_rollout(
                     continue
                 margin = margin_team0 if TEAM_OF[seat] == 0 else -margin_team0
                 seat_transitions[-1].reward = deal_margin_reward(margin, reward_scale)
+                label = outcome_label(seat, result)
+                for t in seat_transitions:
+                    t.outcome_target = label
                 trajectories.append(seat_transitions)
                 all_transitions.extend(seat_transitions)
                 stats.n_transitions += len(seat_transitions)

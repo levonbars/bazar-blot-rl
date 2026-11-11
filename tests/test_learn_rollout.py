@@ -198,3 +198,75 @@ def test_reward_scale_controls_how_much_large_margins_saturate() -> None:
     rb = [t.reward for t in b if t.reward != 0.0]
     assert len(ra) == len(rb) > 0
     assert all(abs(y) < abs(x) for x, y in zip(ra, rb, strict=True))  # same margins, gentler squash
+
+
+def test_outcome_labels_match_the_finished_deal() -> None:
+    """Every learner transition carries the deal's outcome from its own seat's view: teammates get
+    the same label, opponents the mirrored one, and aborted deals the abort class."""
+    from bazarblot.agents.nn.network import (
+        OUTCOME_ABORT,
+        OUTCOME_THEY_FAIL,
+        OUTCOME_THEY_MAKE,
+        OUTCOME_WE_FAIL,
+        OUTCOME_WE_MAKE,
+    )
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    transitions, stats = collect_rollout(RULES, SPACE, net, n_deals=30, seed=0)
+    labels = {t.outcome_target for t in transitions}
+    assert -1 not in labels
+    assert labels <= {
+        OUTCOME_ABORT,
+        OUTCOME_WE_MAKE,
+        OUTCOME_WE_FAIL,
+        OUTCOME_THEY_MAKE,
+        OUTCOME_THEY_FAIL,
+    }
+    # In pure self-play both teams are present in every completed deal, so "we" and "they"
+    # labels must appear equally often across a deal's final transitions.
+    finals = [t.outcome_target for t in transitions if t.reward != 0.0]
+    we = sum(x in (OUTCOME_WE_MAKE, OUTCOME_WE_FAIL) for x in finals)
+    they = sum(x in (OUTCOME_THEY_MAKE, OUTCOME_THEY_FAIL) for x in finals)
+    assert we == they > 0
+    assert len(stats.selfplay_levels) == stats.n_deals - stats.n_aborted
+
+
+def test_outcome_label_mapping() -> None:
+    from types import SimpleNamespace
+
+    from bazarblot.agents.nn.network import (
+        OUTCOME_ABORT,
+        OUTCOME_THEY_FAIL,
+        OUTCOME_THEY_MAKE,
+        OUTCOME_WE_FAIL,
+        OUTCOME_WE_MAKE,
+    )
+    from bazarblot.learn.rollout import outcome_label
+
+    made = SimpleNamespace(attackers_team=0, made=True)
+    failed = SimpleNamespace(attackers_team=1, made=False)
+    assert outcome_label(0, None) == OUTCOME_ABORT
+    assert outcome_label(0, made) == OUTCOME_WE_MAKE  # type: ignore[arg-type]
+    assert outcome_label(2, made) == OUTCOME_WE_MAKE  # type: ignore[arg-type]
+    assert outcome_label(1, made) == OUTCOME_THEY_MAKE  # type: ignore[arg-type]
+    assert outcome_label(1, failed) == OUTCOME_WE_FAIL  # type: ignore[arg-type]
+    assert outcome_label(0, failed) == OUTCOME_THEY_FAIL  # type: ignore[arg-type]
+
+
+def test_auction_hitting_the_step_cap_is_scored_as_an_abort() -> None:
+    """An untrained network that bids about half the time can circle past the engine's
+    `max_auction_steps` safety cap; the rollout must score that as an abort, not crash."""
+    import dataclasses
+
+    from bazarblot.agents.nn.network import OUTCOME_ABORT
+
+    tight = dataclasses.replace(
+        RULES, auction=dataclasses.replace(RULES.auction, max_auction_steps=3)
+    )
+    torch.manual_seed(0)
+    net = build_network(tight)
+    transitions, stats = collect_rollout(tight, SPACE, net, n_deals=40, seed=0)
+    assert stats.n_capped > 0
+    assert stats.n_aborted >= stats.n_capped
+    assert any(t.outcome_target == OUTCOME_ABORT for t in transitions)

@@ -3,6 +3,16 @@
 Ordered, testable milestones. Each has an explicit **Done when** — a check that can be run, not a
 feeling. Hand these to the implementation model one milestone at a time; do not let it run ahead.
 
+**The goal every milestone serves (project owner, 2026-11):** a deep-RL agent that bids correctly,
+plays correctly, and **signals to its partner through its bids — having learned all three on its
+own**. Bids carry information in real play (a bid in a suit can show its jack and nine; partner's
+raise can count their aces), and the card play that follows depends on reading it. Conventions
+must emerge from self-play; human conventions may be added later, but are not written into the
+agent. Consequences: hand-written heuristics and rules are **yardsticks, never teachers** (no
+behaviour cloning or distillation of them into the learner), and "beats the heuristic" is
+necessary, not sufficient — a milestone that involves bidding is not done until information
+carried by the auction is measured.
+
 The target ruleset is **Blot Star plus the project owner's corrections**
 ([`01-rules.md`](01-rules.md)). All but two `[OPEN]` items are resolved, and neither remaining one
 (OPEN-2c auction termination, OPEN-10 rounding) blocks implementation — both sit behind config
@@ -733,10 +743,18 @@ Model-free baseline, per spec §7.1(1).
   `deal_margin` reward, paired sampling within the batch.
 - League/opponent pool with historical checkpoints to avoid self-play cycling.
 
-**Done when:** the learned agent beats `heuristic` with a paired CI excluding 0, and beats
-`PIMC-20` or the gap is measured and explained.
+**Done when** (revised 2026-11-11, see "Change of direction" at the end of the status): an agent
+trained **from a random initialisation, with no heuristic as teacher**:
+1. beats `heuristic` and the always-pass bidder with a paired CI excluding 0, and beats `PIMC-20`
+   or the gap is measured and explained;
+2. bids sanely in self-play (contracts reached, most of them made, declaring worth more than
+   conceding);
+3. **its auction carries information to the partner, measured**: the belief head predicts
+   partner's unseen cards measurably better from the real auction than from an auction with
+   partner's bids replaced, and changing partner's bids for the same cards changes the cards it
+   plays.
 
-### M7 status: **pipeline built and stable; the agent does not yet bid, so the done-when bar is NOT met in substance**
+### M7 status: **pipeline built and stable; heuristic-bootstrapped agents bid and play, but the revised done-when (learned from scratch, signaling measured) is NOT met**
 
 > **Read this first.** Two things below were wrong at the time they were written, and later
 > sections correct earlier ones (the sections are kept in the order they were written).
@@ -747,6 +765,8 @@ Model-free baseline, per spec §7.1(1).
 > of its contracts, so against it, conceding every auction and defending really was the winning
 > strategy, and every agent trained or cloned against it learned from that. All checkpoints and
 > margins from before that fix are against a broken opponent and should not be relied on.
+> (3) Steps 2-3d below bootstrapped the agent from the heuristic; the last section, "Change of
+> direction", explains why that was dropped and what replaces it.
 
 Built as `src/bazarblot/agents/nn/` (the model: `bid_factor.py`, `network.py`, `ppo_agent.py`) and
 `src/bazarblot/learn/` (the training loop: `reward.py`, `rollout.py`, `ppo.py`, `opponent_pool.py`,
@@ -1144,6 +1164,109 @@ partner's bid for the same cards changes the card played; (6) add opponents that
 agent learns to answer a double; (7) stronger play (solver teacher for endgames) and the
 search-based baseline.
 
+**Change of direction (2026-11-11): back to learning from scratch.** Reviewing steps 2-3d against
+the project goal (top of this document) showed the work had drifted from it:
+
+- *The agents are bootstrapped from hand-written knowledge.* Bidding and play were cloned from the
+  heuristic (step 2) and doubling was distilled from a hand-written rule (step 3d); reinforcement
+  learning added a contesting style worth about +5 against the heuristic. That is not an agent
+  that learned to bid and play on its own.
+- *The reason for cloning was never re-tested.* Cloning was adopted because from-scratch PPO "would
+  not bid", but every from-scratch run predates the units-bug fix and trained against the broken
+  heuristic. Whether PPO from random weights learns to bid against sane opponents is open.
+- *Cloning froze in exactly the habits signaling needs to break.* Measured on 400 deals each:
+  the heuristic and the clone bid over their own partner's standing bid 0 times (in ~360
+  chances); the step-3d agent did so in 7.9% of chances (54 of 683), only 5 of them in partner's
+  suit. Doubling likewise appeared only through the distilled rule.
+- *The play network could not see the whole auction.* Observations up to `v2` gave the play phase
+  only the last 8 auction actions (`bid_recent`) plus each seat's latest bid (`bid_summary`). The
+  step-3d agent's auctions ran past 8 actions in 50% of deals (median 9, max 16), so 21% of all
+  bids, the earliest ones first, were invisible by the time play started. No training scheme
+  could have taught it to read an opening bid as a signal.
+- *Nothing measured signaling.* No metric in M5, M7 or M8 asked whether the auction carries
+  information to the partner.
+
+What changes:
+
+1. **Observation `v3`** (`env/obs.py`): two new blocks, `auction_history` (24 x 16, the auction
+   from its first action, row = position in the auction, every phase) and `auction_meta`
+   (length / 24, truncated flag); 734 -> 1,120 floats, full encoding 259 -> 223 deals/s.
+   `bid_recent` is kept for the bidding decision. All `v2` checkpoints are refused on load, which
+   is intended: the next agents start from random weights.
+2. **No heuristic teachers.** Behaviour cloning and distillation of hand-written agents are
+   retired as ways to start the learner (`learn/imitation.py` and `cli/distill.py` stay for
+   comparisons). Heuristics, the always-pass bidder and PIMC remain as evaluation opponents.
+3. **Next:** a from-scratch run (random weights, self-play against its own snapshots, the
+   centralized critic, per-phase advantage normalization), with only structure-level help that
+   carries no strategy: an initial bias of the raise head toward small raises (an untrained head
+   is uniform over 73 raises, so its contracts sit near level 65 and are almost never made) and
+   the contract-outcome prediction head of spec §7.2. Pass bar for this first run: it bids, the
+   share of its contracts that are made rises, and it beats the always-pass bidder. If self-play
+   collapses to all-pass again (as it did before the fix), the first remedy is a random-bidding
+   opponent in the pool, not a heuristic one.
+4. **Then:** the signaling measurement (done-when item 3), and only after the from-scratch run
+   shows a learning signal, parallel rollouts to scale it. A double-dummy solver is fine as an
+   auxiliary prediction target but not as a card-play teacher: it sees all four hands, so imitating
+   it would train out reading the auction.
+
+The step 2-3d agents (`checkpoints/m7_*`, `v2`, local only) are reference points; their numbers
+above remain valid as results about heuristic-bootstrapped training.
+
+**From-scratch result (`checkpoints/m7_scratch1`): it learns to bid and play on its own, to
+heuristic level, in about 100k deals.** Setup: random weights; starting biases from
+`apply_action_prior` (raise decay 0.5, capot -4, doubling -3); centralized critic; belief weight
+0.2; contract-outcome head (`network.py::OUTCOME_*`, labels from the finished deal) weight 0.5;
+entropy bonus 0.02 -> 0.005; no forced exploration; pure self-play plus its own snapshots (30% of
+deals), **no heuristic or random opponent in training**; 400 iterations x 256 deals (~102k deals),
+about 52 minutes. Heuristics and the always-pass bidder appear only in evaluation.
+
+- *Starting biases, measured on an untrained network* (400 deals): without them it opens at median
+  level 44, bids capot in 71% and doubles 85% of contracts (contra ends the auction and capot is
+  sticky, so small per-decision odds compound), and makes 2%; with them it opens at 9, capot 13%,
+  doubled 17%, made 15%. Auctions that hit the engine's 64-action cap are scored as aborts
+  (`RolloutStats.n_capped`; never hit in this run).
+- *The pass slide happened and reversed by itself.* The share of passed-out deals rose from 6% to
+  75% by iteration 10 (the collapse seen in the first M7 runs), then fell to 41% at iteration 25,
+  under 10% by 30 and ~0% from 60 on, as the contracts that were still bid (level 8) started being
+  made. No opponent was needed to break it.
+- *In-run evaluation* (greedy, 150 pairs; margin of agent over opponent):
+
+  | iteration | 25 | 50 | 75 | 100 | 125 | 150 | 200 | 250 | 300 | 350 | 400 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | vs heuristic | -12.8 | -10.5 | -9.9 | -6.6 | -5.4 | -1.6 | -1.0 | +1.9 | -0.8 | +1.9 | +0.3 |
+  | vs always-pass bidder | -7.6 | -9.8 | -5.2 | -1.6 | -1.5 | +2.8 | +5.0 | +6.1 | +3.1 | +6.8 | +4.9 |
+
+  Level with the heuristic from iteration ~150 on (CI includes 0 at every check from 150, except
+  -2.6 at 375); above the always-pass bidder with a CI excluding 0 at every check from 150.
+- *Held-out profile of the final network* (`cli.robustness`, fresh seeds, 300 pairs):
+  -6 +2.4, -3 +2.1, -1 +0.6, 0 -0.3, +2 -3.0, +4 -2.6, +8 +21.0, +12 +31.4 (CIs exclude 0 at -6,
+  -3, +2, +4, +8, +12). The heuristic-bootstrapped 3b agent was +8.2, +7.4, +6.1, +5.4, +2.7, +5.4,
+  +20.2, +29.2: the from-scratch agent is ~5 points weaker against normal bidders and loses to
+  mildly aggressive ones (+2, +4), level against reckless ones.
+- *Behaviour:* a contester like the earlier joint runs: against the heuristic it declares in
+  ~90% of contested deals and makes ~66% of them; self-play reaches a contract in every deal,
+  median level 12, 65% made, declaring worth +5.9 per deal.
+- *Doubling died out.* Explored early (17% of contracts doubled at the start), it fell to ~0
+  even in sampled play by iteration ~290 (0 doubles in ~1,500 chances per iteration) and the
+  greedy policy never doubled. It was tried while card play was weak and lost, and was not
+  revisited. Unsolved; to be addressed without a hand-written rule.
+- *Signaling, first measurement* (`partner's bids silenced` test: at each seat's first card play,
+  400 greedy self-play deals, partner's auction actions replaced by passes, final-contract blocks
+  left as they were): partner's real bids improve the log-likelihood of partner's unseen cards by
+  0.000 (untrained control), 0.023 (iteration 150), 0.040 (275), 0.045 nats per card (final), so the
+  bids increasingly carry information beyond the final contract. But the first card played changes
+  when partner's bids are silenced in 3.1% (control), 5.7%, 3.9%, 3.2% of decisions: the play does
+  not yet use it. Significance not yet tested; the measurement is a scratch script, to be turned
+  into `eval/` code.
+
+Reading: the claim that this agent cannot learn bidding without a teacher is refuted: from
+random weights, with no hand-written strategy in training, it reaches heuristic level in ~100k
+deals. It has not passed the revised done-when: it does not beat the heuristic, it does not
+double, and its auction carries only a little information that its play does not yet act on.
+Natural next steps: more deals (parallel rollouts), the signaling measurement as proper `eval/`
+code with confidence intervals, and finding why doubling dies (a fixed exploration floor for
+doubling, or a larger reward scale, as step 3d(b) suggested).
+
 Full project suite passes (`pytest`, 387 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
@@ -1157,9 +1280,18 @@ reasoning as the existing `pettingzoo` overrides.
 Run the §7.3 comparison as a controlled experiment on one fixed rules preset:
 - (a) joint end-to-end self-play
 - (b) iterated freeze-and-retrain
-- (c) bid-by-evaluation using the play network's value/contract head
+- (c) bid-by-evaluation using the play network's value/contract head — a **comparison point
+  only**: it picks the bid that is best for its own hand, so its bids tell the partner nothing
+  beyond hand strength and it cannot signal
 - (d) ablation: learned bidder + heuristic player, and heuristic bidder + learned player, to
   isolate where the gains live
+
+Every table also reports **how much information the auction carries to the partner** (the
+signaling measures of M7's done-when, item 3), since an approach that wins on margin by bidding
+only for its own hand has not met the project goal. Plus one experiment specific to that goal:
+does the learned auction convey anything recognisable (e.g. does a bid in a suit predict holding
+its jack or nine; does partner's raise size track their aces)? Measured by probing the trained
+belief head, never by writing conventions into the agent.
 
 Plus ablations: suit augmentation on/off; auxiliary heads on/off; no-trump ("boy")
 enabled/disabled; features vs. sequence model; **match target** 101 vs 301 (endgame-bidding
@@ -1217,6 +1349,9 @@ actually lands, and where the paper's novelty ceiling is.
 | Linear reward normalization — a recontra'd high `NT` failure pays 200+ and eats the batch | squashed margin, constant fixed from the empirical median |
 | `legal_mask` computed from full state → information leak through the mask | M3 leakage test |
 | Reward shaping to "help" the bidder | banned; use auxiliary heads |
+| Cloning or distilling a hand-written agent to get past a learning obstacle — it imports the heuristic's habits (the clone never bid over its partner and never doubled) and defeats the goal of an agent that learns on its own | heuristics are evaluation opponents only; check the baseline and setup for bugs first (M7's "no bidding" was a heuristic bug) |
+| The play phase seeing only the tail of the auction — early bids, the ones that would carry signals, drop out first | `auction_history` from the first action (`v3`); check auction lengths against the window whenever behaviour changes |
+| Judging a bidder by its margin alone — bid-by-evaluation can win on margin and still signal nothing | report the signaling measures (M7 done-when 3) beside every bidding result |
 | Evaluating unpaired → deal variance swamps the signal | `eval/duplicate.py` is the only entry point |
 | Rules drift between runs invalidating comparisons | `rules_hash` stamped in checkpoints |
 | Centralized critic accidentally used at execution time | separate `InfoSet` / `DealState` types |

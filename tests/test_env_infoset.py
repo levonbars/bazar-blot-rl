@@ -152,6 +152,8 @@ _MELD_DERIVED_KEYS = (
     "contract_progress",
     "bid_summary",
     "bid_recent",
+    "auction_history",
+    "auction_meta",
 )
 _NON_MELD_KEYS = tuple(k for k in BLOCK_SHAPES if k not in _MELD_DERIVED_KEYS)
 

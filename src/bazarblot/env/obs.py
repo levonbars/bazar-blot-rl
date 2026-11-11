@@ -42,7 +42,7 @@ from bazarblot.core.rules import RuleConfig
 from bazarblot.env.infoset import InfoSet
 from bazarblot.env.tracked_deal import AuctionEvent
 
-OBS_VERSION = "v2"
+OBS_VERSION = "v3"
 
 Array = npt.NDArray[np.float32]
 
@@ -51,6 +51,12 @@ _LEVEL_ONEHOT_MIN = 8
 _LEVEL_ONEHOT_MAX = 32  # spec §4.3: clipped one-hot for 8..32, scalar carries the rest
 _LEVEL_ONEHOT_N = _LEVEL_ONEHOT_MAX - _LEVEL_ONEHOT_MIN + 1  # 25
 _BID_RECENT_LEN = 8
+# v3: the whole auction from its first action, so a bid made early (an opening bid, the first
+# raise) is still visible during card play. `bid_recent` alone (last 8) lost ~21% of bids by the
+# start of play for a trained agent whose auctions ran past 8 actions in half of all deals, which
+# makes reading partner's bids as signals impossible for exactly the bids that would carry them.
+# 24 covers every auction observed so far (longest 16); longer ones set the truncation flag.
+_AUCTION_HISTORY_LEN = 24
 _BID_KIND = ("pass", "bid", "contra", "recontra")
 
 BLOCK_SHAPES: dict[str, tuple[int, ...]] = {
@@ -82,6 +88,8 @@ BLOCK_SHAPES: dict[str, tuple[int, ...]] = {
     "contract_progress": (5,),
     "match_state": (6,),
     "bid_recent": (_BID_RECENT_LEN, 16),  # auction phase only
+    "auction_history": (_AUCTION_HISTORY_LEN, 16),  # v3: from the first action, every phase
+    "auction_meta": (2,),  # v3: auction length / 24 (clipped), history-truncated flag
 }
 
 
@@ -472,6 +480,25 @@ def _bid_recent_block(info: InfoSet) -> Array:
     return out
 
 
+def _auction_history_block(info: InfoSet) -> Array:
+    """The auction from its FIRST action, row i = action i (zero rows after the end). Unlike
+    `bid_recent` (right-aligned, most recent last, for the bidding decision), the row index here is
+    the action's position in the auction, so "partner's opening bid" sits at a fixed place."""
+    out = np.zeros(BLOCK_SHAPES["auction_history"], dtype=np.float32)
+    max_bid = info.rules.auction.max_bid
+    types_with_none = ("none", *info.rules.contracts.types)
+    for i, ev in enumerate(info.auction_log[:_AUCTION_HISTORY_LEN]):
+        out[i, :] = _encode_auction_event(ev, info.seat, max_bid, types_with_none)
+    return out
+
+
+def _auction_meta_block(info: InfoSet) -> Array:
+    n = len(info.auction_log)
+    return np.array(
+        [min(1.0, n / _AUCTION_HISTORY_LEN), float(n > _AUCTION_HISTORY_LEN)], dtype=np.float32
+    )
+
+
 def _encode_auction_event(
     ev: AuctionEvent, my_seat: int, max_bid: int, types_with_none: tuple[str, ...]
 ) -> Array:
@@ -535,6 +562,8 @@ def encode(info: InfoSet) -> dict[str, Array]:
         # `observation_space` (§5.1), which every agent framework downstream assumes. `flatten`
         # is therefore a pure function of `BLOCK_SHAPES` with no phase-conditional branch.
         "bid_recent": _bid_recent_block(info),
+        "auction_history": _auction_history_block(info),
+        "auction_meta": _auction_meta_block(info),
     }
     return blocks
 

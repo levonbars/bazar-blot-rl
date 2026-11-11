@@ -306,7 +306,11 @@ project; do it in M3, not as an afterthought.
 | `contract_progress` | 5 | `raw_A/(10·level)`, `points_still_available/162`, `sign(need_met)`, `capot_still_live` (attackers have taken every trick so far), `capot_already_broken` (a capot *bid* is now unmakeable) |
 | `match_state` | 6 | my match score, opp match score (both `/target`), `points_to_target` each, deal number, dealer rel |
 
-**Total (play net, dropping `bid_recent`): ≈ 480 floats.**
+| `auction_history` (`v3`) | 24 × 16 = 384 | the whole auction **from its first action**, same per-action tuple as `bid_recent`, row = position in the auction, zero rows after the end; present in **every** phase. The play phase must see the opening bids: they are the ones that carry signals to the partner, and a last-8 window drops them first (it lost 21% of bids for a trained agent, see roadmap M7) |
+| `auction_meta` (`v3`) | 2 | auction length `/24` (clipped), and a flag set if the auction was longer than 24 actions |
+
+**Total (play net, dropping `bid_recent`): ≈ 480 floats.** (These two totals predate `v3` and
+the implementation's choices; the shipped `v3` vector is 1,120 floats in every phase.)
 **Total (auction net): ≈ 610 floats**, or keep the auction history as a length-`T` token sequence
 for a small transformer instead of a flat block (recommended if you go the transformer route).
 
@@ -475,7 +479,11 @@ The bidder's value depends on the player's skill. Options to compare:
   player → repeat. Cleaner credit assignment, risk of oscillation.
 - **Bid-by-evaluation:** the bidder does not learn a policy at all; it evaluates each candidate
   contract with the *play* network's value head (or with PIMC/DD rollouts) and bids argmax. This
-  is the strongest simple baseline and mirrors how strong human players actually bid.
+  is a strong simple *baseline*, but it only models the bidder's own hand: it does not choose bids
+  for what they tell the partner, and the partner does not raise to answer. Real players bid
+  conventionally (a bid in a suit shows specific cards; partner's raise counts aces), so
+  bid-by-evaluation **cannot signal** and is not a candidate for the final agent, which must learn
+  its own conventions (roadmap, project goal).
 
 A results table comparing these three is a publishable core of the paper.
 
@@ -528,6 +536,12 @@ deals purely from deals. Design for this from day one.
   - trick-play efficiency: points lost vs. DD-optimal play *given the actual deal*
     (i.e. how much worse than a cheating player), split by contract type
   - declaration handling, if `declarations_are_actions`
+  - **information carried by the auction** (the project's core question): (i) belief-head
+    accuracy / log-loss on *partner's* unseen cards at the start of play, with the real auction
+    vs. with partner's auction actions replaced (e.g. by passes or by another deal's bids), same
+    cards; (ii) how often the card the agent plays changes when only partner's bids are changed;
+    (iii) probes of what bids predict (does a bid in a suit predict its jack/nine; does a raise's
+    size predict aces held). A bidder can win on margin and score zero on all three.
 - **Opponents:** random-legal, heuristic, PIMC-`K` for several `K`, prior checkpoints (league),
   and if you can get them, logs from a real platform.
 - **Elo** over a round-robin pool, computed on paired deals.

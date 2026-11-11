@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from bazarblot.agents.base import Agent
 from bazarblot.agents.composed import ComposedAgent
 from bazarblot.agents.heuristic import HeuristicAgent
-from bazarblot.agents.nn.network import CentralCritic, build_network
+from bazarblot.agents.nn.network import CentralCritic, apply_action_prior, build_network
 from bazarblot.agents.nn.ppo_agent import NNAgent
 from bazarblot.agents.pass_bidder import PassBidder
 from bazarblot.agents.random_agent import RandomAgent
@@ -64,6 +64,13 @@ class TrainConfig:
     every seat (roadmap M7 stage 1); `None` is the original joint bid-and-play training. Evaluation
     then pits `heuristic bidding + learned play` against `heuristic bidding + baseline play`, so a
     margin reflects play skill alone and cannot come from conceding auctions."""
+    raise_prior_decay: float = 0.0
+    capot_prior_bias: float = 0.0
+    double_prior_bias: float = 0.0
+    """Starting biases of the auction heads for a network trained from scratch
+    (`agents/nn/network.py::apply_action_prior`): a prior on the shape of the action space (small
+    raises, rare capot, rare doubling), not on which hands to bid. Ignored with
+    `init_checkpoint`. All 0 reproduces the uniform start."""
     init_checkpoint: Path | None = None
     """Start from this checkpoint (e.g. the behavior-cloned player from `cli/imitate.py`) instead
     of a randomly initialised network."""
@@ -245,6 +252,12 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             critic = critic_from_payload(payload)
     else:
         net = build_network(rules, hidden=config.hidden)
+        apply_action_prior(
+            net,
+            raise_decay=config.raise_prior_decay,
+            capot_bias=config.capot_prior_bias,
+            double_bias=config.double_prior_bias,
+        )
     if config.central_critic and critic is None:
         critic = CentralCritic(hidden=config.critic_hidden)
     if critic is not None:
@@ -302,7 +315,12 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
         step_optimizer = optimizer
         if iteration < config.value_warmup_iters:
             ppo_config = replace(
-                config.ppo, policy_coef=0.0, entropy_coef=0.0, belief_coef=0.0, target_kl=None
+                config.ppo,
+                policy_coef=0.0,
+                entropy_coef=0.0,
+                belief_coef=0.0,
+                outcome_coef=0.0,
+                target_kl=None,
             )
             step_optimizer = warmup_optimizer
         t0 = time.perf_counter()
@@ -330,6 +348,20 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
         if config.ppo.belief_coef > 0.0:
             writer.add_scalar("ppo/belief_loss", update_stats.belief_loss, iteration)
             writer.add_scalar("ppo/belief_acc", update_stats.belief_acc, iteration)
+        if config.ppo.outcome_coef > 0.0:
+            writer.add_scalar("ppo/outcome_loss", update_stats.outcome_loss, iteration)
+            writer.add_scalar("ppo/outcome_acc", update_stats.outcome_acc, iteration)
+        writer.add_scalar("rollout/n_capped", stats.n_capped, iteration)
+        sp_n = len(stats.selfplay_levels)
+        sp_str = "n/a"
+        if sp_n:
+            sp_level = float(np.median(stats.selfplay_levels))
+            sp_made = stats.n_selfplay_made / sp_n
+            sp_dbl = stats.n_selfplay_doubled / sp_n
+            writer.add_scalar("selfplay/median_level", sp_level, iteration)
+            writer.add_scalar("selfplay/made_rate", sp_made, iteration)
+            writer.add_scalar("selfplay/doubled_rate", sp_dbl, iteration)
+            sp_str = f"lvl={sp_level:.0f} made={sp_made:.2f} dbl={sp_dbl:.2f}"
         writer.add_scalar("time/rollout_s", t_rollout, iteration)
         writer.add_scalar("time/update_s", t_update, iteration)
 
@@ -352,6 +384,8 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             f"value_loss={update_stats.value_loss:.4f}  entropy={update_stats.entropy:.3f}  "
             f"kl={update_stats.approx_kl:+.4f}  clip={update_stats.clip_fraction:.3f}  "
             f"belief_acc={update_stats.belief_acc:.3f}  "
+            f"outcome_acc={update_stats.outcome_acc:.3f}  selfplay[{sp_str}]  "
+            f"capped={stats.n_capped}  "
             f"t=({t_rollout:.1f}s rollout, {t_update:.1f}s update)"
         )
 

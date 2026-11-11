@@ -24,7 +24,53 @@ def test_obs_version_is_stamped() -> None:
     # v2: `contract_progress`'s need-met feature now sums raw card and combination points before
     # comparing with the bid (v1 added raw combination points to a scaled card total). Checkpoints
     # trained on v1 are refused by `learn/checkpoint.py`, as the version rule intends.
-    assert OBS_VERSION == "v2"
+    # v3: `auction_history`/`auction_meta` show the whole auction from its first action.
+    assert OBS_VERSION == "v3"
+
+
+def test_auction_history_keeps_the_opening_bid_through_play() -> None:
+    """The point of v3: in a long auction the first bid falls out of `bid_recent` (last 8) but must
+    still be in row 0 of `auction_history` during card play, attributed to the right seat."""
+    from bazarblot.core.auction import BidAction, PassAction
+
+    found = 0
+    for seed in range(300):
+        rng = random.Random(seed)
+        deal = Deal(RULES, dealer=seed % 4, hands=deal_hands(rng, RULES), deal_id=seed)
+        tracked = TrackedDeal(deal)
+        # Raise by one each turn for a while, so the auction runs well past 8 actions.
+        n = 0
+        while deal.phase == Phase.AUCTION:
+            info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=0)
+            legal = [SPACE.decode(int(i)) for i in legal_mask(info, SPACE).nonzero()[0]]
+            bids = [a for a in legal if isinstance(a, BidAction) and not a.capot]
+            if n < 12 and bids:
+                action = min(bids, key=lambda a: (a.level, a.contract_type != "H"))
+            else:
+                action = next(a for a in legal if isinstance(a, PassAction))
+            tracked.step(action)
+            n += 1
+        if deal.phase != Phase.PLAY:
+            continue
+        info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=0)
+        log = info.auction_log
+        if len(log) <= 8:
+            continue
+        blocks = encode(info)
+        first = log[0]
+        assert isinstance(first.action, BidAction)
+        row = blocks["auction_history"][0]
+        assert row[1] == 1.0  # kind = bid
+        assert row[2 + 10 + (first.seat - info.seat) % 4] == 1.0  # seat_rel
+        assert row[10] == np.float32(first.action.level / RULES.auction.max_bid)
+        assert blocks["auction_history"][len(log) - 1].any()
+        assert not blocks["auction_history"][len(log) :].any()
+        assert blocks["auction_meta"][0] == np.float32(min(1.0, len(log) / 24))
+        assert blocks["auction_meta"][1] == 0.0
+        # ...and bid_recent has indeed lost it
+        assert len(log) > 8 and not np.array_equal(blocks["bid_recent"][0], row)
+        found += 1
+    assert found >= 20
 
 
 def _play_random_deal(seed: int) -> tuple[Deal, TrackedDeal]:

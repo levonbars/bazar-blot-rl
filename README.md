@@ -92,10 +92,15 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0 through M6 complete; M7 in progress (agent does not yet bid).**
+**M0 through M6 complete; M7 in progress: restarting learning from scratch (see "Change of
+direction" below).**
+
+**Goal:** an agent that bids correctly, plays correctly, and signals to its partner through its
+bids, having learned all three on its own in self-play. Hand-written heuristics are yardsticks,
+not teachers.
 
 The rules engine (`src/bazarblot/core/`) implements auction, trick play, combination detection
-and scoring end to end. 236 tests, 99–100% coverage of `core/` and `solver/` (floor is 95%), a
+and scoring end to end. At M1: 236 tests (398 across the project now), 99–100% coverage of `core/` and `solver/` (floor is 95%), a
 golden-hash regression fixture over 1000 seeded deals, and a 1,000,000-deal random-legal-playout
 validation with invariants enabled and zero failures. A local FastAPI UI (`src/bazarblot/ui/`)
 can watch, play, and replay deals against a placeholder bot.
@@ -294,6 +299,25 @@ bidding style from timid to reckless, by about 35 and 51 points at the two most 
 less saturating reward let exploration find some doubling unaided (about 1% of chances), but not
 enough to use it greedily. Full account in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
+
+**Change of direction (2026-11-11).** Those agents learned mostly by copying: bidding and play
+were cloned from the heuristic and doubling was distilled from a hand-written rule, which is not
+the goal. The copy also kept the heuristic's habits (it never bid over its partner, which is where
+a convention like "raise once per ace" would live), and a review found that the play network could
+only see the last 8 auction actions, so in half of the trained agent's deals the opening bids
+were gone by the time it played a card. Changes: observation `v3` shows the whole auction from its
+first action in every phase; heuristics are evaluation opponents only; the next run starts from
+random weights in self-play; and M7's done-when now requires measuring how much information the
+auction carries to the partner, not only beating the heuristic.
+
+**First from-scratch result.** From random weights, with no heuristic in training (only small
+starting biases toward low raises, rare capot and rare doubling, plus a head that predicts the
+deal's outcome), self-play PPO learned to bid and play to the heuristic's level in about 100k
+deals (52 minutes): level with the heuristic, +5 over the always-pass bidder. It briefly slid
+toward always passing and recovered on its own. It is still ~5 points weaker than the
+heuristic-cloned agent against normal bidders, never doubles (doubling was explored early and
+abandoned), and its partner's bids carry a small, growing amount of information about partner's
+hand that its card play does not yet use. Details in the roadmap, M7.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

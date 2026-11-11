@@ -36,6 +36,15 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         help="train card play only, with this agent making every auction decision",
     )
     p.add_argument("--belief-coef", type=float, default=0.0)
+    p.add_argument("--outcome-coef", type=float, default=0.0)
+    p.add_argument(
+        "--raise-prior-decay",
+        type=float,
+        default=0.0,
+        help="from-scratch start: lower the logit of a raise of k by decay*(k-1)",
+    )
+    p.add_argument("--capot-prior-bias", type=float, default=0.0)
+    p.add_argument("--double-prior-bias", type=float, default=0.0)
     p.add_argument("--init-checkpoint", type=Path, default=None)
     p.add_argument("--value-warmup-iters", type=int, default=0)
     p.add_argument(
@@ -68,7 +77,10 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         n_iterations=args.iterations,
         n_deals_per_iter=args.deals_per_iter,
         seed=args.seed,
-        ppo=PPOConfig(lr=args.lr, belief_coef=args.belief_coef),
+        ppo=PPOConfig(lr=args.lr, belief_coef=args.belief_coef, outcome_coef=args.outcome_coef),
+        raise_prior_decay=args.raise_prior_decay,
+        capot_prior_bias=args.capot_prior_bias,
+        double_prior_bias=args.double_prior_bias,
         init_checkpoint=args.init_checkpoint,
         value_warmup_iters=args.value_warmup_iters,
         entropy_coef_start=args.entropy_coef_start,
@@ -81,7 +93,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         forced_contra_prob_end=args.forced_contra_prob_end,
         bid_agent=args.bid_agent,
         central_critic=args.central_critic,
-        baseline_opponents=tuple(args.opponents.split(",")),
+        baseline_opponents=tuple(x for x in args.opponents.split(",") if x),
         heldout_offsets=tuple(int(x) for x in args.heldout_offsets.split(",") if x),
         heldout_pairs=args.heldout_pairs,
         opponent_prob=args.opponent_prob,

@@ -3,7 +3,8 @@
 factored `(Delta, type, capot)` for a bid (spec §3.2), flat over `PASS`/`CONTRA`/`RECONTRA`/`BID`
 during the auction, flat over the 32 cards during play.
 
-**Belief head (spec §7.2) is built; DD-value and contract-outcome are not.** The belief head
+**Belief and contract-outcome heads (spec §7.2) are built; DD-value is not.** The outcome head
+predicts how the deal ends (`OUTCOME_*`) from the deciding seat's view. The belief head
 predicts, per card, which of the three other seats holds it, trained from the ground-truth deal
 (`learn/belief.py`) as a dense auxiliary signal, and doubles as the measurement of how much
 information the bidding conveys to a partner. The other two are real, documented future work
@@ -44,6 +45,13 @@ N_META = 4
 # other seats in seat-relative order (rel 1 = left opponent, 2 = partner, 3 = right opponent).
 # Only cards that are still in some other seat's hand carry a label (`learn/belief.py`).
 N_BELIEF_SEATS = 3
+
+# Contract-outcome head (spec §7.2, "*the* bidding signal"): how the deal will end, from the
+# deciding seat's point of view. Learned from outcomes (free labels from the finished deal), so it
+# carries no hand-written knowledge; it gives the trunk a dense reason to represent "can my side
+# make a contract here" during the auction, where the terminal reward alone is a thin signal.
+OUTCOME_ABORT, OUTCOME_WE_MAKE, OUTCOME_WE_FAIL, OUTCOME_THEY_MAKE, OUTCOME_THEY_FAIL = range(5)
+N_OUTCOMES = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +107,7 @@ class PolicyValueNet(nn.Module):
         self.card_head = nn.Linear(trunk_out, heads.n_cards)
         self.value_head = nn.Linear(trunk_out, 1)
         self.belief_head = nn.Linear(trunk_out, heads.n_cards * N_BELIEF_SEATS)
+        self.outcome_head = nn.Linear(trunk_out, N_OUTCOMES)
 
     def forward(self, obs: Tensor) -> dict[str, Tensor]:
         trunk = self.trunk(obs)
@@ -110,7 +119,38 @@ class PolicyValueNet(nn.Module):
             "card": self.card_head(trunk),
             "value": self.value_head(trunk).squeeze(-1),
             "belief": self.belief_head(trunk).view(-1, self.heads.n_cards, N_BELIEF_SEATS),
+            "outcome": self.outcome_head(trunk),
         }
+
+
+def apply_action_prior(
+    net: PolicyValueNet,
+    raise_decay: float = 0.0,
+    capot_bias: float = 0.0,
+    double_bias: float = 0.0,
+) -> None:
+    """Set the starting BIASES of the auction heads of an untrained network (weights untouched).
+
+    This is a prior on the shape of the action space, not on strategy: it says nothing about
+    which hands to bid on, which suit, or when to double. It exists because the factored bid head
+    makes a uniform start absurd -- the raise head is uniform over 73 raise sizes, so an untrained
+    network opens near level 40 on average and almost never makes a contract, and half of its bids
+    are capot (all eight tricks). PPO then learns mostly that bidding loses.
+
+    - `raise_decay`: logit of a raise of `k` levels is lowered by `raise_decay * (k - 1)`, so small
+      raises are likelier; with 0.5, about 40% of raises are +1 and ~85% are at most +4.
+    - `capot_bias`: added to the capot logit (index 1 of the capot head).
+    - `double_bias`: added to the contra and recontra logits of the meta head.
+    """
+    with torch.no_grad():
+        n_delta = net.delta_head.bias.shape[0]
+        net.delta_head.bias.copy_(-raise_decay * torch.arange(n_delta, dtype=torch.float32))
+        if net.capot_head.bias.shape[0] > 1:
+            net.capot_head.bias.zero_()
+            net.capot_head.bias[1] = capot_bias
+        net.meta_head.bias.zero_()
+        net.meta_head.bias[META_CONTRA] = double_bias
+        net.meta_head.bias[META_RECONTRA] = double_bias
 
 
 PRIVILEGED_DIM = 32 * N_BELIEF_SEATS

@@ -46,6 +46,9 @@ class PPOConfig:
     before any policy-gradient step can disturb the cloned policy (`learn/train.py`)."""
     belief_coef: float = 0.0
     """Weight on the belief head's cross-entropy (`learn/belief.py`); 0 disables it."""
+    outcome_coef: float = 0.0
+    """Weight on the contract-outcome head's cross-entropy (`OUTCOME_*` labels from the finished
+    deal); 0 disables it."""
     normalize_per_phase: bool = True
     """Normalize advantages separately for auction and card-play decisions. The two have very
     different scales (one bid fixes the contract and moves the result a lot; one card changes it
@@ -70,6 +73,8 @@ class PPOUpdateStats:
     clip_fraction: float
     belief_loss: float = 0.0
     belief_acc: float = 0.0
+    outcome_loss: float = 0.0
+    outcome_acc: float = 0.0
 
 
 def _normalize(advantages: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
@@ -128,6 +133,8 @@ def ppo_update(
         "approx_kl": 0.0,
         "belief_loss": 0.0,
         "belief_acc": 0.0,
+        "outcome_loss": 0.0,
+        "outcome_acc": 0.0,
     }
     n_clipped = 0
     n_updates = 0
@@ -216,11 +223,24 @@ def ppo_update(
                 batch_belief_loss = belief_loss(out_batch["belief"], targets)
                 batch_belief_acc = belief_accuracy(out_batch["belief"], targets)
 
+            batch_outcome_loss = torch.zeros(())
+            batch_outcome_acc = 0.0
+            if config.outcome_coef > 0.0:
+                labels = torch.tensor([transitions[i].outcome_target for i in idx])
+                labelled = labels >= 0
+                if bool(labelled.any()):
+                    logits = out_batch["outcome"][labelled]
+                    batch_outcome_loss = torch.nn.functional.cross_entropy(logits, labels[labelled])
+                    batch_outcome_acc = float(
+                        (logits.argmax(-1) == labels[labelled]).float().mean().item()
+                    )
+
             loss = (
                 config.policy_coef * policy_loss
                 + config.value_coef * value_loss
                 - config.entropy_coef * entropy_bonus
                 + config.belief_coef * batch_belief_loss
+                + config.outcome_coef * batch_outcome_loss
             )
 
             optimizer.zero_grad()
@@ -240,6 +260,8 @@ def ppo_update(
             stats_accum["approx_kl"] += approx_kl
             stats_accum["belief_loss"] += float(batch_belief_loss.item())
             stats_accum["belief_acc"] += batch_belief_acc
+            stats_accum["outcome_loss"] += float(batch_outcome_loss.item())
+            stats_accum["outcome_acc"] += batch_outcome_acc
             n_updates += 1
 
     if n_updates == 0:
@@ -259,6 +281,8 @@ def ppo_update(
         clip_fraction=n_clipped / max(1, n * config.epochs),
         belief_loss=stats_accum["belief_loss"] / n_updates,
         belief_acc=stats_accum["belief_acc"] / n_updates,
+        outcome_loss=stats_accum["outcome_loss"] / n_updates,
+        outcome_acc=stats_accum["outcome_acc"] / n_updates,
     )
 
 
