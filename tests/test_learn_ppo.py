@@ -134,3 +134,44 @@ def test_repeated_updates_on_a_fixed_batch_reduce_value_loss() -> None:
     # first/last points, the value loss on this fixed batch should be decisively lower once the
     # optimizer has had 30 passes over it.
     assert sum(losses[-5:]) / 5 < sum(losses[:5]) / 5 * 0.5
+
+
+def test_belief_coef_reports_belief_loss_and_accuracy() -> None:
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    transitions, _ = collect_rollout(RULES, SPACE, net, n_deals=15, seed=0)
+    optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+    stats = ppo_update(
+        net, SPACE, transitions, optimizer, PPOConfig(epochs=2, minibatch_size=64, belief_coef=0.5)
+    )
+    assert stats.belief_loss > 0.0
+    assert 0.0 <= stats.belief_acc <= 1.0
+
+    off = ppo_update(
+        net, SPACE, transitions, optimizer, PPOConfig(epochs=1, minibatch_size=64, belief_coef=0.0)
+    )
+    assert off.belief_loss == 0.0
+
+
+def test_value_only_update_leaves_policy_head_untouched() -> None:
+    """The value warm-up after behavior cloning must not disturb the cloned policy: with the
+    policy, entropy and belief terms off and an optimizer over `value_head` alone, the card head
+    and trunk are byte-for-byte unchanged while the value head moves."""
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    transitions, _ = collect_rollout(RULES, SPACE, net, n_deals=15, seed=0)
+    before = {k: v.clone() for k, v in net.state_dict().items()}
+    optimizer = torch.optim.Adam(net.value_head.parameters(), lr=1e-2)
+    config = PPOConfig(
+        epochs=2,
+        minibatch_size=64,
+        policy_coef=0.0,
+        entropy_coef=0.0,
+        belief_coef=0.0,
+        target_kl=None,
+    )
+    ppo_update(net, SPACE, transitions, optimizer, config)
+    after = net.state_dict()
+    for key in before:
+        changed = not torch.equal(before[key], after[key])
+        assert changed == key.startswith("value_head"), key

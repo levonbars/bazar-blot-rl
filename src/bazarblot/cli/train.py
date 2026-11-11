@@ -32,6 +32,9 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         default=None,
         help="train card play only, with this agent making every auction decision",
     )
+    p.add_argument("--belief-coef", type=float, default=0.0)
+    p.add_argument("--init-checkpoint", type=Path, default=None)
+    p.add_argument("--value-warmup-iters", type=int, default=0)
     p.add_argument("--opponent-prob", type=float, default=0.3)
     p.add_argument("--snapshot-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=20)
@@ -44,7 +47,9 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         n_iterations=args.iterations,
         n_deals_per_iter=args.deals_per_iter,
         seed=args.seed,
-        ppo=PPOConfig(lr=args.lr),
+        ppo=PPOConfig(lr=args.lr, belief_coef=args.belief_coef),
+        init_checkpoint=args.init_checkpoint,
+        value_warmup_iters=args.value_warmup_iters,
         entropy_coef_start=args.entropy_coef_start,
         entropy_coef_end=args.entropy_coef_end,
         forced_bid_prob_start=args.forced_bid_prob_start,

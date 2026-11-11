@@ -3,10 +3,12 @@
 factored `(Delta, type, capot)` for a bid (spec §3.2), flat over `PASS`/`CONTRA`/`RECONTRA`/`BID`
 during the auction, flat over the 32 cards during play.
 
-**Auxiliary heads (belief, DD-value, contract-outcome, spec §7.2) are deliberately not built
-here.** They are real, documented future work (see `docs/03-implementation-roadmap.md` M7), not
-an oversight: belief/contract-outcome need their own label-construction and loss-weighting code
-that nothing here yet exercises, and the DD-value head's "free" labels are only free in the sense
+**Belief head (spec §7.2) is built; DD-value and contract-outcome are not.** The belief head
+predicts, per card, which of the three other seats holds it, trained from the ground-truth deal
+(`learn/belief.py`) as a dense auxiliary signal, and doubles as the measurement of how much
+information the bidding conveys to a partner. The other two are real, documented future work
+(see `docs/03-implementation-roadmap.md` M7), not an oversight: contract-outcome needs its own
+label construction, and the DD-value head's "free" labels are only free in the sense
 that `solver/dd.py` already exists -- each label is still a multi-second-to-tens-of-seconds full
 solve (M2/M2.5), which would make DD-value labels the dominant cost of every training batch and
 undo M6's throughput work. Shipping the plain policy+value baseline first (the spec's own
@@ -36,6 +38,11 @@ OBS_DIM = sum(math.prod(shape) for shape in BLOCK_SHAPES.values())
 # Meta head order for the auction phase: which of the four top-level auction choices this is.
 META_PASS, META_CONTRA, META_RECONTRA, META_BID = range(4)
 N_META = 4
+
+# Belief head: for each of the 32 cards, a 3-way distribution over WHO holds it, among the three
+# other seats in seat-relative order (rel 1 = left opponent, 2 = partner, 3 = right opponent).
+# Only cards that are still in some other seat's hand carry a label (`learn/belief.py`).
+N_BELIEF_SEATS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +97,7 @@ class PolicyValueNet(nn.Module):
         self.capot_head = nn.Linear(trunk_out, heads.capot_states)
         self.card_head = nn.Linear(trunk_out, heads.n_cards)
         self.value_head = nn.Linear(trunk_out, 1)
+        self.belief_head = nn.Linear(trunk_out, heads.n_cards * N_BELIEF_SEATS)
 
     def forward(self, obs: Tensor) -> dict[str, Tensor]:
         trunk = self.trunk(obs)
@@ -100,6 +108,7 @@ class PolicyValueNet(nn.Module):
             "capot": self.capot_head(trunk),
             "card": self.card_head(trunk),
             "value": self.value_head(trunk).squeeze(-1),
+            "belief": self.belief_head(trunk).view(-1, self.heads.n_cards, N_BELIEF_SEATS),
         }
 
 

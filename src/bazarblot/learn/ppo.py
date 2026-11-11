@@ -26,6 +26,7 @@ from torch import optim
 from bazarblot.agents.nn.network import PolicyValueNet
 from bazarblot.agents.nn.ppo_agent import _recompute_log_prob_from_output
 from bazarblot.env.actions import ActionSpace
+from bazarblot.learn.belief import IGNORE, belief_accuracy, belief_loss
 from bazarblot.learn.rollout import Transition
 
 
@@ -38,6 +39,12 @@ class PPOConfig:
     epochs: int = 4
     minibatch_size: int = 256
     max_grad_norm: float = 0.5
+    policy_coef: float = 1.0
+    """Weight on the clipped policy-gradient loss. 0 (with `entropy_coef=0`) turns the update into
+    pure critic/auxiliary fitting -- used to warm up the value head after behavior cloning
+    before any policy-gradient step can disturb the cloned policy (`learn/train.py`)."""
+    belief_coef: float = 0.0
+    """Weight on the belief head's cross-entropy (`learn/belief.py`); 0 disables it."""
     target_kl: float | None = 0.03
     """Stop taking further epochs over this batch once a minibatch's `approx_kl` exceeds this --
     standard PPO early-stopping (e.g. Stable-Baselines3's default `target_kl`). Observed as
@@ -55,6 +62,8 @@ class PPOUpdateStats:
     entropy: float
     approx_kl: float
     clip_fraction: float
+    belief_loss: float = 0.0
+    belief_acc: float = 0.0
 
 
 def _normalize(advantages: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
@@ -93,7 +102,14 @@ def ppo_update(
     old_log_probs = np.array([t.decision.log_prob for t in transitions], dtype=np.float32)
 
     n = len(transitions)
-    stats_accum = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "approx_kl": 0.0}
+    stats_accum = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "entropy": 0.0,
+        "approx_kl": 0.0,
+        "belief_loss": 0.0,
+        "belief_acc": 0.0,
+    }
     n_clipped = 0
     n_updates = 0
 
@@ -152,8 +168,27 @@ def ppo_update(
             value_loss = torch.nn.functional.mse_loss(values, batch_returns)
             entropy_bonus = entropies.mean()
 
+            batch_belief_loss = torch.zeros(())
+            batch_belief_acc = 0.0
+            if config.belief_coef > 0.0:
+                targets = torch.from_numpy(
+                    np.stack(
+                        [
+                            transitions[i].belief_target
+                            if transitions[i].belief_target is not None
+                            else np.full(out_batch["belief"].shape[1], IGNORE, dtype=np.int8)
+                            for i in idx
+                        ]
+                    ).astype(np.int64)
+                )
+                batch_belief_loss = belief_loss(out_batch["belief"], targets)
+                batch_belief_acc = belief_accuracy(out_batch["belief"], targets)
+
             loss = (
-                policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy_bonus
+                config.policy_coef * policy_loss
+                + config.value_coef * value_loss
+                - config.entropy_coef * entropy_bonus
+                + config.belief_coef * batch_belief_loss
             )
 
             optimizer.zero_grad()
@@ -168,6 +203,8 @@ def ppo_update(
             stats_accum["value_loss"] += float(value_loss.item())
             stats_accum["entropy"] += float(entropy_bonus.item())
             stats_accum["approx_kl"] += approx_kl
+            stats_accum["belief_loss"] += float(batch_belief_loss.item())
+            stats_accum["belief_acc"] += batch_belief_acc
             n_updates += 1
 
     if n_updates == 0:
@@ -185,4 +222,6 @@ def ppo_update(
         entropy=stats_accum["entropy"] / n_updates,
         approx_kl=stats_accum["approx_kl"] / n_updates,
         clip_fraction=n_clipped / max(1, n * config.epochs),
+        belief_loss=stats_accum["belief_loss"] / n_updates,
+        belief_acc=stats_accum["belief_acc"] / n_updates,
     )

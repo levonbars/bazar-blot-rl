@@ -26,7 +26,7 @@ from bazarblot.agents.random_agent import RandomAgent
 from bazarblot.core.rules import RuleConfig, load_default
 from bazarblot.env.actions import build_action_space
 from bazarblot.eval.metrics import evaluate_pairs
-from bazarblot.learn.checkpoint import save_checkpoint
+from bazarblot.learn.checkpoint import load_checkpoint, save_checkpoint
 from bazarblot.learn.opponent_pool import OpponentPool
 from bazarblot.learn.ppo import PPOConfig, ppo_update
 from bazarblot.learn.rollout import Opponent, collect_rollout
@@ -51,6 +51,15 @@ class TrainConfig:
     every seat (roadmap M7 stage 1); `None` is the original joint bid-and-play training. Evaluation
     then pits `heuristic bidding + learned play` against `heuristic bidding + baseline play`, so a
     margin reflects play skill alone and cannot come from conceding auctions."""
+    init_checkpoint: Path | None = None
+    """Start from this checkpoint (e.g. the behavior-cloned player from `cli/imitate.py`) instead
+    of a randomly initialised network."""
+    value_warmup_iters: int = 0
+    """For this many initial iterations, fit ONLY the value head (policy, entropy and belief
+    terms off, optimizer over `value_head` parameters alone) on rollouts from the loaded policy.
+    A cloned policy comes with an untrained critic; letting policy-gradient steps run against a
+    garbage baseline would wreck the very policy the clone provides, so the critic is brought up
+    to speed first with the policy frozen."""
     opponent_prob: float = 0.3
     pool_max_size: int = 8
     snapshot_every: int = 20
@@ -135,8 +144,13 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
-    net = build_network(rules, hidden=config.hidden)
+    if config.init_checkpoint is not None:
+        net, _ = load_checkpoint(config.init_checkpoint, rules)
+        net.train()
+    else:
+        net = build_network(rules, hidden=config.hidden)
     optimizer = torch.optim.Adam(net.parameters(), lr=config.ppo.lr)
+    warmup_optimizer = torch.optim.Adam(net.value_head.parameters(), lr=1e-3)
     pool = OpponentPool(max_size=config.pool_max_size)
     writer = SummaryWriter(log_dir=str(config.log_dir))
 
@@ -174,8 +188,14 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
 
         entropy_coef = _entropy_coef_at(iteration, config)
         ppo_config = replace(config.ppo, entropy_coef=entropy_coef)
+        step_optimizer = optimizer
+        if iteration < config.value_warmup_iters:
+            ppo_config = replace(
+                config.ppo, policy_coef=0.0, entropy_coef=0.0, belief_coef=0.0, target_kl=None
+            )
+            step_optimizer = warmup_optimizer
         t0 = time.perf_counter()
-        update_stats = ppo_update(net, space, transitions, optimizer, ppo_config)
+        update_stats = ppo_update(net, space, transitions, step_optimizer, ppo_config)
         t_update = time.perf_counter() - t0
 
         margin_mean = float(np.mean(stats.raw_margins)) if stats.raw_margins else 0.0
@@ -194,6 +214,9 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
         writer.add_scalar("ppo/entropy", update_stats.entropy, iteration)
         writer.add_scalar("ppo/approx_kl", update_stats.approx_kl, iteration)
         writer.add_scalar("ppo/clip_fraction", update_stats.clip_fraction, iteration)
+        if config.ppo.belief_coef > 0.0:
+            writer.add_scalar("ppo/belief_loss", update_stats.belief_loss, iteration)
+            writer.add_scalar("ppo/belief_acc", update_stats.belief_acc, iteration)
         writer.add_scalar("time/rollout_s", t_rollout, iteration)
         writer.add_scalar("time/update_s", t_update, iteration)
 
@@ -204,6 +227,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             f"fbid={forced_bid_prob:.2f}  "
             f"value_loss={update_stats.value_loss:.4f}  entropy={update_stats.entropy:.3f}  "
             f"kl={update_stats.approx_kl:+.4f}  clip={update_stats.clip_fraction:.3f}  "
+            f"belief_acc={update_stats.belief_acc:.3f}  "
             f"t=({t_rollout:.1f}s rollout, {t_update:.1f}s update)"
         )
 

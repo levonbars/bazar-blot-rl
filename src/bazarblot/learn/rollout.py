@@ -19,6 +19,9 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
+import numpy as np
+import numpy.typing as npt
+
 from bazarblot.agents.base import Agent
 from bazarblot.agents.nn.network import PolicyValueNet
 from bazarblot.agents.nn.ppo_agent import Decision, decide
@@ -29,6 +32,7 @@ from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import ActionSpace, legal_mask
 from bazarblot.env.infoset import info_set
 from bazarblot.env.tracked_deal import TrackedDeal
+from bazarblot.learn.belief import belief_target
 from bazarblot.learn.reward import deal_margin_reward
 
 Opponent = PolicyValueNet | Agent
@@ -37,6 +41,9 @@ Opponent = PolicyValueNet | Agent
 @dataclass(slots=True)
 class Transition:
     decision: Decision
+    belief_target: npt.NDArray[np.int8] | None = None
+    """Ground-truth holder of every unseen card at this decision (`learn/belief.py`), computed
+    from the deal in rollout code -- training-only, never part of the policy's input."""
     reward: float = 0.0
     advantage: float = 0.0
     ret: float = 0.0
@@ -141,7 +148,9 @@ def _play_one(
             decision = decide(
                 learner, info, space, mask, sample=True, forced_bid_prob=forced_bid_prob
             )
-            transitions[seat].append(Transition(decision=decision))
+            transitions[seat].append(
+                Transition(decision=decision, belief_target=belief_target(deal.hands, seat))
+            )
             action_idx = decision.action_idx
         elif isinstance(actor, PolicyValueNet):
             action_idx = decide(actor, info, space, mask, sample=True).action_idx

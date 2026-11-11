@@ -55,5 +55,6 @@ def test_forward_shapes_and_determinism() -> None:
     assert out1["type"].shape == (3, 5)
     assert out1["capot"].shape == (3, 2)
     assert out1["card"].shape == (3, 32)
+    assert out1["belief"].shape == (3, 32, 3)
     for key in out1:
         assert torch.equal(out1[key], out2[key])

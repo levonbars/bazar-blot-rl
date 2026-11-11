@@ -102,3 +102,27 @@ def test_train_rejects_unknown_bid_agent(tmp_path) -> None:  # type: ignore[no-u
     )
     with pytest.raises(ValueError, match="unknown bid_agent"):
         train(config, rules=RULES)
+
+
+def test_train_from_init_checkpoint_with_value_warmup(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from bazarblot.agents.nn.network import build_network
+    from bazarblot.learn.checkpoint import save_checkpoint
+
+    init = tmp_path / "init.pt"
+    save_checkpoint(init, build_network(RULES), RULES, extra={"iteration": 0})
+    config = TrainConfig(
+        n_iterations=3,
+        n_deals_per_iter=6,
+        ppo=PPOConfig(epochs=1, minibatch_size=32, belief_coef=0.5),
+        bid_agent="heuristic",
+        init_checkpoint=init,
+        value_warmup_iters=1,
+        opponent_prob=0.5,
+        snapshot_every=10,
+        eval_every=10,
+        eval_n_pairs=2,
+        checkpoint_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    train(config, rules=RULES)
+    assert (tmp_path / "checkpoints" / "final.pt").exists()
