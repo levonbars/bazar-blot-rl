@@ -35,6 +35,16 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--belief-coef", type=float, default=0.0)
     p.add_argument("--init-checkpoint", type=Path, default=None)
     p.add_argument("--value-warmup-iters", type=int, default=0)
+    p.add_argument(
+        "--central-critic",
+        action="store_true",
+        help="train a centralized critic (sees hidden hands, training only) as the baseline",
+    )
+    p.add_argument(
+        "--opponents",
+        default="heuristic,random",
+        help="comma-separated fixed training opponents from: heuristic, random, passer",
+    )
     p.add_argument("--opponent-prob", type=float, default=0.3)
     p.add_argument("--snapshot-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=20)
@@ -56,6 +66,8 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         forced_bid_prob_end=args.forced_bid_prob_end,
         forced_bid_anneal_frac=args.forced_bid_anneal_frac,
         bid_agent=args.bid_agent,
+        central_critic=args.central_critic,
+        baseline_opponents=tuple(args.opponents.split(",")),
         opponent_prob=args.opponent_prob,
         snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,

@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from bazarblot.agents.nn.network import PolicyValueNet, build_network
+from bazarblot.agents.nn.network import CentralCritic, PolicyValueNet, build_network
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.obs import OBS_VERSION
 
@@ -20,8 +20,14 @@ class CheckpointVersionMismatch(RuntimeError):
 
 
 def save_checkpoint(
-    path: Path, net: PolicyValueNet, rules: RuleConfig, extra: dict[str, Any]
+    path: Path,
+    net: PolicyValueNet,
+    rules: RuleConfig,
+    extra: dict[str, Any],
+    critic: CentralCritic | None = None,
 ) -> None:
+    """Save the actor (and, if given, the training-only centralized critic, so a resumed run does
+    not restart from an untrained baseline)."""
     payload = {
         "obs_version": OBS_VERSION,
         "rules_hash": rules.rules_hash,
@@ -29,6 +35,9 @@ def save_checkpoint(
         "state_dict": net.state_dict(),
         **extra,
     }
+    if critic is not None:
+        payload["critic_hidden"] = tuple(critic.hidden)
+        payload["critic_state_dict"] = critic.state_dict()
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
 
@@ -52,3 +61,12 @@ def load_checkpoint(path: Path, rules: RuleConfig) -> tuple[PolicyValueNet, dict
 
 def _hidden_sizes(net: PolicyValueNet) -> tuple[int, ...]:
     return tuple(layer.out_features for layer in net.trunk if isinstance(layer, torch.nn.Linear))
+
+
+def critic_from_payload(payload: dict[str, Any]) -> CentralCritic | None:
+    """The centralized critic stored in a checkpoint payload, or `None` if it has none."""
+    if "critic_state_dict" not in payload:
+        return None
+    critic = CentralCritic(hidden=tuple(payload["critic_hidden"]))
+    critic.load_state_dict(payload["critic_state_dict"])
+    return critic

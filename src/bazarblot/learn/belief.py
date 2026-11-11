@@ -43,6 +43,20 @@ def belief_target(
     return target
 
 
+def privileged_features(targets: npt.NDArray[np.int8]) -> npt.NDArray[np.float32]:
+    """The hidden hands as critic input: `(..., N_CARDS)` holder labels -> `(..., N_CARDS * 3)`
+    one-hot (per card, which of the three other seats holds it; all zeros for unlabelled cards).
+
+    This is exactly the information a centralized critic adds to the actor's observation (spec
+    §7.4): together with the information-set observation it determines the whole deal state. It is
+    used for training-time value estimates only and never reaches the policy."""
+    out = np.zeros((*targets.shape, 3), dtype=np.float32)
+    valid = targets != IGNORE
+    idx = np.nonzero(valid)
+    out[(*idx, targets[valid].astype(np.int64))] = 1.0
+    return out.reshape(*targets.shape[:-1], targets.shape[-1] * 3)
+
+
 def belief_loss(logits: Tensor, targets: Tensor) -> Tensor:
     """Mean cross-entropy over the labelled cards of a batch. `logits` is `(B, N_CARDS, 3)`,
     `targets` is `(B, N_CARDS)` int64 with `IGNORE` where unlabelled. Returns 0 (with grad

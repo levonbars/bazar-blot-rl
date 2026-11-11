@@ -21,9 +21,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 from bazarblot.agents.base import Agent
-from bazarblot.agents.nn.network import PolicyValueNet
+from bazarblot.agents.nn.network import CentralCritic, PolicyValueNet
 from bazarblot.agents.nn.ppo_agent import Decision, decide
 from bazarblot.core.cards import TEAM_OF
 from bazarblot.core.deal import Deal, Phase
@@ -32,7 +33,7 @@ from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import ActionSpace, legal_mask
 from bazarblot.env.infoset import info_set
 from bazarblot.env.tracked_deal import TrackedDeal
-from bazarblot.learn.belief import belief_target
+from bazarblot.learn.belief import belief_target, privileged_features
 from bazarblot.learn.reward import deal_margin_reward
 
 Opponent = PolicyValueNet | Agent
@@ -44,6 +45,9 @@ class Transition:
     belief_target: npt.NDArray[np.int8] | None = None
     """Ground-truth holder of every unseen card at this decision (`learn/belief.py`), computed
     from the deal in rollout code -- training-only, never part of the policy's input."""
+    value: float = 0.0
+    """Baseline used for the advantage: the actor's own value head by default, or the centralized
+    critic's estimate when one is supplied to `collect_rollout`."""
     reward: float = 0.0
     advantage: float = 0.0
     ret: float = 0.0
@@ -56,11 +60,34 @@ def _gae(transitions: list[Transition], gamma: float, lam: float) -> None:
     next_value = 0.0
     gae = 0.0
     for t in reversed(transitions):
-        delta = t.reward + gamma * next_value - t.decision.value
+        delta = t.reward + gamma * next_value - t.value
         gae = delta + gamma * lam * gae
         t.advantage = gae
-        t.ret = gae + t.decision.value
-        next_value = t.decision.value
+        t.ret = gae + t.value
+        next_value = t.value
+
+
+def _assign_critic_values(critic: CentralCritic, transitions: list[Transition]) -> None:
+    """Overwrite each transition's baseline `value` with the centralized critic's estimate, in
+    batches of a few thousand under `no_grad`."""
+    was_training = critic.training
+    critic.eval()
+    with torch.no_grad():
+        for start in range(0, len(transitions), 4096):
+            chunk = transitions[start : start + 4096]
+            obs = torch.from_numpy(np.stack([t.decision.obs for t in chunk]))
+            targets = np.stack([_require_belief_target(t) for t in chunk])
+            priv = torch.from_numpy(privileged_features(targets))
+            values = critic(obs, priv)
+            for t, v in zip(chunk, values.tolist(), strict=True):
+                t.value = float(v)
+    critic.train(was_training)
+
+
+def _require_belief_target(t: Transition) -> npt.NDArray[np.int8]:
+    if t.belief_target is None:
+        raise ValueError("a centralized critic needs ground-truth hands on every transition")
+    return t.belief_target
 
 
 @dataclass(slots=True)
@@ -149,7 +176,11 @@ def _play_one(
                 learner, info, space, mask, sample=True, forced_bid_prob=forced_bid_prob
             )
             transitions[seat].append(
-                Transition(decision=decision, belief_target=belief_target(deal.hands, seat))
+                Transition(
+                    decision=decision,
+                    belief_target=belief_target(deal.hands, seat),
+                    value=decision.value,
+                )
             )
             action_idx = decision.action_idx
         elif isinstance(actor, PolicyValueNet):
@@ -177,8 +208,14 @@ def collect_rollout(
     lam: float = 0.95,
     forced_bid_prob: float = 0.0,
     bid_agent: Agent | None = None,
+    critic: CentralCritic | None = None,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
+
+    `critic` (a training-only centralized value function that sees the hidden hands, spec §7.4)
+    replaces the actor's own value head as the baseline for the advantages: after the whole batch
+    of deals is collected, every transition's value is re-estimated by the critic in a few batched
+    calls and only then are the advantages computed. The actor never sees what the critic sees.
 
     `forced_bid_prob` (see `agents/nn/ppo_agent.py::_auction_decision`) biases the LEARNER's own
     auction sampling toward `BID` during collection, without touching what `legal_mask` itself
@@ -210,6 +247,7 @@ def collect_rollout(
     throughout, independent of what the learner's own policy has drifted toward."""
     rng = random.Random(seed)
     all_transitions: list[Transition] = []
+    trajectories: list[list[Transition]] = []
     stats = RolloutStats()
 
     for i in range(n_deals):
@@ -254,8 +292,13 @@ def collect_rollout(
                     continue
                 margin = margin_team0 if TEAM_OF[seat] == 0 else -margin_team0
                 seat_transitions[-1].reward = deal_margin_reward(margin)
-                _gae(seat_transitions, gamma, lam)
+                trajectories.append(seat_transitions)
                 all_transitions.extend(seat_transitions)
                 stats.n_transitions += len(seat_transitions)
+
+    if critic is not None and all_transitions:
+        _assign_critic_values(critic, all_transitions)
+    for seat_transitions in trajectories:
+        _gae(seat_transitions, gamma, lam)
 
     return all_transitions, stats

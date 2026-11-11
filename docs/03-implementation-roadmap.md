@@ -969,7 +969,55 @@ is guarded by a regression test (`test_cloned_network_actually_bids_and_complete
 The clone is a copy, so it is not expected to beat the heuristic; it is the starting point for
 step 3 (joint self-play). `OBS_VERSION` v2 checkpoints from this step are in `checkpoints/m7_bc2/`.
 
-Full project suite passes (`pytest`, 364 tests); `ruff check`/`ruff format --check` and `mypy
+**Step 3 result: joint bidding-and-play training works and is stable, but what it learned is tuned
+to its training opponents.** Setup (`cli.train --central-critic ...`): start from the cloned
+network; a centralized critic (a separate network that sees the other three seats' unplayed hands,
+training only, `agents/nn/network.py::CentralCritic`) is the advantage baseline, warmed up for 30
+iterations with the policy frozen; advantages are normalized separately for auction and card-play
+decisions (bids move the result far more than cards, so one global scale lets bids swamp play);
+opponents are the heuristic and the always-pass bidder plus snapshots of earlier versions, half the
+deals against them and half pure self-play; lr 1e-4, entropy bonus 0.01 to 0.003, belief weight
+0.2, no forced-bid exploration. 300 iterations of 256 deals (~77k deals, ~40 minutes).
+
+- *Stable:* no collapse to never bidding, KL stayed ~0.004-0.006, the critic's loss stayed small,
+  belief accuracy rose from 0.48 to 0.54.
+- *Margin over the training heuristic* (200 pairs each, evaluation every 25 iterations): -0.6 for
+  the clone (iteration 25, still in warm-up), then +0.9, +2.2, +3.4, +4.5, +4.1, +3.6, +4.3, +2.6,
+  +3.8, +6.1, +4.9 at iteration 300. The CI excludes 0 in our favour at every evaluation from
+  iteration 75 on. Against random the margin stayed ~+113 (same as the heuristic); over the
+  always-pass bidder it FELL from +12.2 to about +9.5.
+- *Behaviour changed a lot:* against the heuristic the agent's team now declares in 84-93% of
+  contested deals from iteration 125 on (clone: 48%), contracts are reached in 96-100% of deals (clone: 83%) and 100% of
+  all-four-seats self-play auctions end in a contract (clone: 80%), while the share of declared
+  contracts that are made fell from ~0.85 to ~0.75 (self-play: 0.68, versus 0.90 for the clone) and
+  declaring in self-play is worth +7.2 per deal (clone: +16.7). It contests nearly every auction;
+  bid levels barely moved (median 11 vs 10).
+- *Held-out opponents* (`python -m bazarblot.cli.robustness`, heuristics whose bidding is shifted
+  by `bid_offset`, never in the training pool; 300 pairs; margin of agent over opponent):
+
+  | opponent bid_offset | -3 (timid) | -1 | 0 (training heuristic) | +2 | +4 | +8 (reckless) |
+  |---|---|---|---|---|---|---|
+  | clone | +4.8 | -0.2 | -0.1 | +0.7 | +6.6 | +25.4 |
+  | joint-trained | +8.5 | +5.7 | +4.9 | -0.2 | +2.0 | +12.5 |
+
+  The trained agent is clearly better than the clone against timid and normal bidders, level
+  against +2, and worse against over-bidders; averaged over this range the two are about equal
+  (~+6). So the +4.9 is not evidence of a better bidder in general: it learned to contest an
+  opponent that rarely fights back, which costs it against opponents that do. In self-play,
+  where nobody is timid, its aggression shows up as a 32% failure rate.
+
+*Reading.* The method works mechanically (stable, informative critic, no collapse, behaviour is
+visible), and it responds to what it is trained against, which is the point and the problem. The
+margin against a fixed opponent in the training pool is therefore the wrong success criterion.
+Going forward the criterion is the held-out profile (and self-play quality), not a single margin.
+Signaling was not examined in this step.
+
+**Next (step 3b, then 4):** widen the training pool so over-bidding is punished and timid bidding
+is not the only thing to exploit: heuristic variants across the `bid_offset` range, the clone and
+earlier snapshots, with more weight on self-play; gate runs on the robustness profile; then scale
+up (parallel rollouts, millions of deals) before measuring signaling.
+
+Full project suite passes (`pytest`, 375 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

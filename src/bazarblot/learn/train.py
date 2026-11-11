@@ -20,14 +20,15 @@ from torch.utils.tensorboard import SummaryWriter
 from bazarblot.agents.base import Agent
 from bazarblot.agents.composed import ComposedAgent
 from bazarblot.agents.heuristic import HeuristicAgent
-from bazarblot.agents.nn.network import build_network
+from bazarblot.agents.nn.network import CentralCritic, build_network
 from bazarblot.agents.nn.ppo_agent import NNAgent
+from bazarblot.agents.pass_bidder import PassBidder
 from bazarblot.agents.random_agent import RandomAgent
 from bazarblot.core.rules import RuleConfig, load_default
 from bazarblot.env.actions import build_action_space
 from bazarblot.eval.behavior import evaluate_behavior
 from bazarblot.eval.metrics import evaluate_pairs
-from bazarblot.learn.checkpoint import load_checkpoint, save_checkpoint
+from bazarblot.learn.checkpoint import critic_from_payload, load_checkpoint, save_checkpoint
 from bazarblot.learn.opponent_pool import OpponentPool
 from bazarblot.learn.ppo import PPOConfig, ppo_update
 from bazarblot.learn.rollout import Opponent, collect_rollout
@@ -61,6 +62,14 @@ class TrainConfig:
     A cloned policy comes with an untrained critic; letting policy-gradient steps run against a
     garbage baseline would wreck the very policy the clone provides, so the critic is brought up
     to speed first with the policy frozen."""
+    central_critic: bool = False
+    """Use a centralized critic that sees the hidden hands (training only) as the advantage
+    baseline instead of the actor's own value head (spec §7.4). The actor is unchanged and never
+    sees what the critic sees."""
+    critic_hidden: tuple[int, ...] = (256, 256)
+    baseline_opponents: tuple[str, ...] = ("heuristic", "random")
+    """Fixed opponents always in the training pool: any of `heuristic`, `random`, and `passer`
+    (an always-pass bidder with heuristic card play)."""
     opponent_prob: float = 0.3
     pool_max_size: int = 8
     snapshot_every: int = 20
@@ -145,13 +154,22 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
+    critic: CentralCritic | None = None
     if config.init_checkpoint is not None:
-        net, _ = load_checkpoint(config.init_checkpoint, rules)
+        net, payload = load_checkpoint(config.init_checkpoint, rules)
         net.train()
+        if config.central_critic:
+            critic = critic_from_payload(payload)
     else:
         net = build_network(rules, hidden=config.hidden)
-    optimizer = torch.optim.Adam(net.parameters(), lr=config.ppo.lr)
-    warmup_optimizer = torch.optim.Adam(net.value_head.parameters(), lr=1e-3)
+    if config.central_critic and critic is None:
+        critic = CentralCritic(hidden=config.critic_hidden)
+    if critic is not None:
+        critic.train()
+    params = list(net.parameters()) + (list(critic.parameters()) if critic is not None else [])
+    optimizer = torch.optim.Adam(params, lr=config.ppo.lr)
+    warmup_params = critic.parameters() if critic is not None else net.value_head.parameters()
+    warmup_optimizer = torch.optim.Adam(warmup_params, lr=1e-3)
     pool = OpponentPool(max_size=config.pool_max_size)
     writer = SummaryWriter(log_dir=str(config.log_dir))
 
@@ -164,7 +182,15 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
     # still-randomly-initialized seats can collapse to a degenerate "everyone always passes"
     # equilibrium within a handful of updates, and a fixed baseline that reliably contests
     # auctions is what breaks that symmetry.
-    baseline_opponents: list[Opponent] = [heuristic_agent, random_agent]
+    available: dict[str, Agent] = {
+        "heuristic": heuristic_agent,
+        "random": random_agent,
+        "passer": ComposedAgent(PassBidder(), heuristic_agent),
+    }
+    unknown = [name for name in config.baseline_opponents if name not in available]
+    if unknown:
+        raise ValueError(f"unknown baseline opponents {unknown}; expected from {sorted(available)}")
+    baseline_opponents: list[Opponent] = [available[name] for name in config.baseline_opponents]
     if config.bid_agent not in (None, "heuristic"):
         raise ValueError(f"unknown bid_agent {config.bid_agent!r}; expected None or 'heuristic'")
     bid_agent = heuristic_agent if config.bid_agent == "heuristic" else None
@@ -184,6 +210,7 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             lam=config.lam,
             forced_bid_prob=forced_bid_prob,
             bid_agent=bid_agent,
+            critic=critic,
         )
         t_rollout = time.perf_counter() - t0
 
@@ -196,7 +223,9 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             )
             step_optimizer = warmup_optimizer
         t0 = time.perf_counter()
-        update_stats = ppo_update(net, space, transitions, step_optimizer, ppo_config)
+        update_stats = ppo_update(
+            net, space, transitions, step_optimizer, ppo_config, critic=critic
+        )
         t_update = time.perf_counter() - t0
 
         margin_mean = float(np.mean(stats.raw_margins)) if stats.raw_margins else 0.0
@@ -250,6 +279,25 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
             report_vs_heuristic = evaluate_pairs(
                 rules, space, seeds, dealers, nn_agent, heuristic_agent, n_resamples=2000
             )
+            if bid_agent is None:
+                try:
+                    report_vs_passer = evaluate_pairs(
+                        rules,
+                        space,
+                        seeds,
+                        dealers,
+                        nn_agent,
+                        available["passer"],
+                        n_resamples=2000,
+                    )
+                except RuntimeError:
+                    # Every pair aborted: neither the agent nor the always-pass bidder ever opened.
+                    # That IS the collapse this comparison exists to catch, so report it rather
+                    # than letting the evaluation crash the run.
+                    print("  [eval:vs_passer] every pair aborted: the agent never bid")
+                    writer.add_scalar("eval/never_bids_vs_passer", 1.0, iteration)
+                else:
+                    _log_eval(writer, "vs_passer", report_vs_passer, iteration)
             behavior = evaluate_behavior(
                 rules, space, nn_agent, heuristic_agent, seeds[:60], dealers[:60]
             )
@@ -271,9 +319,14 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                 net,
                 rules,
                 extra={"iteration": iteration + 1},
+                critic=critic,
             )
 
     save_checkpoint(
-        config.checkpoint_dir / "final.pt", net, rules, extra={"iteration": config.n_iterations}
+        config.checkpoint_dir / "final.pt",
+        net,
+        rules,
+        extra={"iteration": config.n_iterations},
+        critic=critic,
     )
     writer.close()

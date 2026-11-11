@@ -23,10 +23,11 @@ import numpy.typing as npt
 import torch
 from torch import optim
 
-from bazarblot.agents.nn.network import PolicyValueNet
+from bazarblot.agents.nn.network import CentralCritic, PolicyValueNet
 from bazarblot.agents.nn.ppo_agent import _recompute_log_prob_from_output
+from bazarblot.core.deal import Phase
 from bazarblot.env.actions import ActionSpace
-from bazarblot.learn.belief import IGNORE, belief_accuracy, belief_loss
+from bazarblot.learn.belief import IGNORE, belief_accuracy, belief_loss, privileged_features
 from bazarblot.learn.rollout import Transition
 
 
@@ -45,6 +46,11 @@ class PPOConfig:
     before any policy-gradient step can disturb the cloned policy (`learn/train.py`)."""
     belief_coef: float = 0.0
     """Weight on the belief head's cross-entropy (`learn/belief.py`); 0 disables it."""
+    normalize_per_phase: bool = True
+    """Normalize advantages separately for auction and card-play decisions. The two have very
+    different scales (one bid fixes the contract and moves the result a lot; one card changes it
+    a little), so a single global normalization lets the bid decisions swamp the card-play signal
+    in the same minibatch."""
     target_kl: float | None = 0.03
     """Stop taking further epochs over this batch once a minibatch's `approx_kl` exceeds this --
     standard PPO early-stopping (e.g. Stable-Baselines3's default `target_kl`). Observed as
@@ -73,12 +79,25 @@ def _normalize(advantages: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
     return np.asarray(result, dtype=np.float32)
 
 
+def _advantages(transitions: list[Transition], per_phase: bool) -> npt.NDArray[np.float32]:
+    raw = np.array([t.advantage for t in transitions], dtype=np.float32)
+    if not per_phase:
+        return _normalize(raw)
+    out = np.zeros_like(raw)
+    phases = np.array([t.decision.phase == Phase.AUCTION for t in transitions])
+    for group in (phases, ~phases):
+        if group.any():
+            out[group] = _normalize(raw[group])
+    return out
+
+
 def ppo_update(
     net: PolicyValueNet,
     space: ActionSpace,
     transitions: list[Transition],
     optimizer: optim.Optimizer,
     config: PPOConfig,
+    critic: CentralCritic | None = None,
 ) -> PPOUpdateStats:
     """One full PPO pass (`config.epochs` epochs over `transitions`, shuffled into
     `config.minibatch_size` minibatches each epoch). Advantages are normalized once, over the
@@ -97,7 +116,7 @@ def ppo_update(
             policy_loss=0.0, value_loss=0.0, entropy=0.0, approx_kl=0.0, clip_fraction=0.0
         )
 
-    advantages = _normalize(np.array([t.advantage for t in transitions], dtype=np.float32))
+    advantages = _advantages(transitions, config.normalize_per_phase)
     returns = np.array([t.ret for t in transitions], dtype=np.float32)
     old_log_probs = np.array([t.decision.log_prob for t in transitions], dtype=np.float32)
 
@@ -144,6 +163,11 @@ def ppo_update(
             new_log_probs = torch.stack(batch_log_probs)
             entropies = torch.stack(batch_entropies)
             values = torch.stack(batch_values)
+            if critic is not None:
+                # The baseline comes from the centralized critic (it sees the hidden hands); the
+                # actor's own value head is then unused. Gradients reach only the critic here.
+                targets_np = np.stack([_require_target(transitions[i]) for i in idx])
+                values = critic(obs_batch, torch.from_numpy(privileged_features(targets_np)))
 
             batch_advantages = torch.from_numpy(advantages[idx])
             batch_returns = torch.from_numpy(returns[idx])
@@ -193,7 +217,10 @@ def ppo_update(
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), config.max_grad_norm)
+            clip_params = list(net.parameters()) + (
+                list(critic.parameters()) if critic is not None else []
+            )
+            torch.nn.utils.clip_grad_norm_(clip_params, config.max_grad_norm)
             optimizer.step()
 
             with torch.no_grad():
@@ -225,3 +252,9 @@ def ppo_update(
         belief_loss=stats_accum["belief_loss"] / n_updates,
         belief_acc=stats_accum["belief_acc"] / n_updates,
     )
+
+
+def _require_target(t: Transition) -> npt.NDArray[np.int8]:
+    if t.belief_target is None:
+        raise ValueError("a centralized critic needs ground-truth hands on every transition")
+    return t.belief_target

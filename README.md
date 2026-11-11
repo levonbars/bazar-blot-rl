@@ -282,7 +282,11 @@ opponent. Direction: clone the fixed heuristic's bidding and play (done: the clo
 reproduces the heuristic's behaviour, 98% card and 98.5% pass-or-bid agreement, same contract and
 make rates), train bidding and play together in self-play, scale up, and measure how bids signal to the partner as that emerges (the belief
 head predicts the unseen cards; the question is how much better it does after hearing the
-auction). Human conventions come later. Full account in
+auction). Human conventions come later. First joint-training result: it beats the training
+heuristic by about +5 and never collapses, but held-out heuristics with different bidding styles
+(`python -m bazarblot.cli.robustness`) show it learned to out-contest a timid opponent, not to
+bid better in general, so the next step widens the opponent pool and judges runs on that
+held-out profile. Full account in
 [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M7.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,

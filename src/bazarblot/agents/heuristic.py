@@ -73,9 +73,15 @@ def _estimate_scaled_value(
 
 
 class HeuristicAgent:
-    def __init__(self, rules: RuleConfig, rng: random.Random | None = None) -> None:
+    def __init__(
+        self, rules: RuleConfig, rng: random.Random | None = None, bid_offset: int = 0
+    ) -> None:
         self.rules = rules
         self.rng = rng if rng is not None else random.Random()
+        # Added to every bid target: negative makes the bidder more timid, positive more
+        # aggressive. 0 (the default) is THE reference heuristic; non-zero values exist to build
+        # held-out opponents whose bidding style differs from the one a learner trained against.
+        self.bid_offset = bid_offset
 
     def act(self, info: InfoSet, space: ActionSpace, legal_mask: npt.NDArray[np.bool_]) -> int:
         if info.phase == Phase.AUCTION:
@@ -103,7 +109,7 @@ class HeuristicAgent:
         standing = info.auction_state.standing_bid
         min_bid, max_bid = self.rules.auction.min_bid, self.rules.auction.max_bid
         best_type, best_value = self._best_contract(info.hand)
-        target = min(max_bid, best_value)
+        target = min(max_bid, best_value + self.bid_offset)
 
         if standing is None:
             if target >= min_bid:

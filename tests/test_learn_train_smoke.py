@@ -126,3 +126,39 @@ def test_train_from_init_checkpoint_with_value_warmup(tmp_path) -> None:  # type
     )
     train(config, rules=RULES)
     assert (tmp_path / "checkpoints" / "final.pt").exists()
+
+
+def test_train_joint_with_central_critic_and_passer_opponent(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The step-3 configuration end to end: joint bidding and play, a centralized critic with a
+    value warm-up, the always-pass opponent in the pool, per-phase advantage normalization."""
+    from bazarblot.learn.checkpoint import critic_from_payload
+
+    config = TrainConfig(
+        n_iterations=3,
+        n_deals_per_iter=8,
+        ppo=PPOConfig(epochs=1, minibatch_size=32, belief_coef=0.2),
+        central_critic=True,
+        value_warmup_iters=1,
+        baseline_opponents=("heuristic", "passer"),
+        opponent_prob=0.5,
+        snapshot_every=10,
+        eval_every=2,
+        eval_n_pairs=3,
+        checkpoint_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    train(config, rules=RULES)
+    _, payload = load_checkpoint(tmp_path / "checkpoints" / "final.pt", RULES)
+    assert critic_from_payload(payload) is not None
+
+
+def test_train_rejects_unknown_baseline_opponent(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    config = TrainConfig(
+        n_iterations=1,
+        n_deals_per_iter=2,
+        baseline_opponents=("nonsense",),
+        checkpoint_dir=tmp_path / "c",
+        log_dir=tmp_path / "r",
+    )
+    with pytest.raises(ValueError, match="unknown baseline opponents"):
+        train(config, rules=RULES)

@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import torch
 from torch import Tensor, nn
 
 from bazarblot.agents.nn.bid_factor import n_delta_slots
@@ -110,6 +111,30 @@ class PolicyValueNet(nn.Module):
             "value": self.value_head(trunk).squeeze(-1),
             "belief": self.belief_head(trunk).view(-1, self.heads.n_cards, N_BELIEF_SEATS),
         }
+
+
+PRIVILEGED_DIM = 32 * N_BELIEF_SEATS
+
+
+class CentralCritic(nn.Module):
+    """Centralized value function (spec §7.4): `V(information-set observation, hidden hands)`.
+
+    Takes the actor's observation PLUS the other three seats' unplayed hands (`PRIVILEGED_DIM`
+    one-hot features, `learn/belief.py::privileged_features`). Because it knows the deal, its
+    estimate absorbs most of the luck of the cards dealt, so a decision's advantage reflects the
+    decision and not the deal -- the main variance reduction available when one terminal reward is
+    shared by ~9 decisions. It is a SEPARATE network from the actor and exists for training only:
+    the actor never receives hidden hands, by construction."""
+
+    def __init__(self, obs_dim: int = OBS_DIM, hidden: tuple[int, ...] = (256, 256)) -> None:
+        super().__init__()
+        self.hidden = hidden
+        self.trunk = _trunk(obs_dim + PRIVILEGED_DIM, hidden)
+        self.head = nn.Linear(hidden[-1], 1)
+
+    def forward(self, obs: Tensor, privileged: Tensor) -> Tensor:
+        value: Tensor = self.head(self.trunk(torch.cat([obs, privileged], dim=-1))).squeeze(-1)
+        return value
 
 
 def build_network(rules: RuleConfig, hidden: tuple[int, ...] = (256, 256)) -> PolicyValueNet:

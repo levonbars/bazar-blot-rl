@@ -98,3 +98,21 @@ def test_pass_bidder_always_passes_and_refuses_to_play() -> None:
                 PassBidder().act(info, SPACE, np.ones_like(legal_mask(info, SPACE)))
             return
     raise AssertionError("no seed reached the play phase")
+
+
+def test_heuristic_bid_offset_shifts_how_often_it_bids() -> None:
+    """`bid_offset` builds held-out opponents of different bidding styles: more aggressive means
+    more auctions end in a contract. The default (0) must be the unchanged reference heuristic."""
+
+    def contract_rate(agent: HeuristicAgent) -> float:
+        results = [
+            play_deal_once(RULES, SPACE, i, 0, i % 4, dict.fromkeys(range(4), agent))
+            for i in range(200)
+        ]
+        return sum(r is not None for r in results) / len(results)
+
+    timid = contract_rate(HeuristicAgent(RULES, bid_offset=-6))
+    reference = contract_rate(HeuristicAgent(RULES))
+    aggressive = contract_rate(HeuristicAgent(RULES, bid_offset=6))
+    assert timid < reference < aggressive
+    assert contract_rate(HeuristicAgent(RULES, bid_offset=0)) == reference
