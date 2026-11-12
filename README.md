@@ -92,8 +92,8 @@ the design (why `play` and `watch` are two genuinely separate code paths, not on
 
 ## Status
 
-**M0 through M6 complete; M7 in progress: restarting learning from scratch (see "Change of
-direction" below).**
+**M0 through M6 complete; M7 in progress: a from-scratch baseline beats the heuristic; partnership
+bidding is not yet learned (see "Change of direction" and "Long from-scratch baseline" below).**
 
 **Goal:** an agent that bids correctly, plays correctly, and signals to its partner through its
 bids, having learned all three on its own in self-play. Hand-written heuristics are yardsticks,
@@ -318,6 +318,15 @@ toward always passing and recovered on its own. It is still ~5 points weaker tha
 heuristic-cloned agent against normal bidders, never doubles (doubling was explored early and
 abandoned), and its partner's bids carry a small, growing amount of information about partner's
 hand that its card play does not yet use. Details in the roadmap, M7.
+
+**Long from-scratch baseline (three seeds).** That first run had trained on only ~655 distinct
+deals because of a seeding bug. With the bug fixed, parallel rollouts and ~1M deals per run (about
+3 hours each), all three seeds beat the heuristic by about +7 points per deal (+5 to +12 against
+normal bidders), beat the heuristic-cloned agent, and play their cards better than the heuristic,
+about 1 point behind PIMC endgame search. Partner's bids measurably inform the belief about
+partner's hand and change the first card played 5-7% of the time. Still missing: partnership
+bidding conventions (answering partner's bid with aces before bidding one's own suit), and doubling
+survived in only one seed of three.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this
