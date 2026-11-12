@@ -1412,7 +1412,7 @@ run. (2) Met. (3) Met in the measured sense (both probes above control), but far
 convention the project owner described. This is the baseline the partnership experiments are
 compared against.
 
-Full project suite passes (`pytest`, 400 tests); `ruff check`/`ruff format --check` and `mypy
+Full project suite passes (`pytest`); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same

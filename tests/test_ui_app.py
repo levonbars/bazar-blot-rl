@@ -194,3 +194,15 @@ def test_play_without_autoplay_lets_the_client_step_each_bot() -> None:
     after = client.post(f"/api/game/{sid}/action", json=action).json()
     assert after["is_bot_turn"] or after["state"]["phase"] != "AUCTION"
     assert len(after["bid_log"]) == len(data["bid_log"]) + 1  # the bots did not move
+
+
+def test_no_new_deal_after_the_match_is_over() -> None:
+    res = client.post("/api/game", json={"mode": "watch", "match_seed": 2, "bot": "simple"})
+    sid = res.json()["session_id"]
+    for _ in range(200):
+        data = client.post(f"/api/game/{sid}/autoplay").json()
+        if data["match_finished"]:
+            break
+        assert client.post(f"/api/game/{sid}/next_deal").status_code == 200
+    assert data["match_finished"]
+    assert client.post(f"/api/game/{sid}/next_deal").status_code == 404

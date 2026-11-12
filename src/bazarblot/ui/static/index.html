@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/static/style.css?v=6" />
+<link rel="stylesheet" href="/static/style.css?v=8" />
 </head>
 <body>
 
@@ -101,16 +101,19 @@
       <div class="nameplate" id="plate2"></div>
       <div class="hand hand-top" id="hand2"></div>
       <div class="bubble" id="bubble2"></div>
+      <div class="shown" id="shown2"></div>
     </div>
     <div class="seat-area pos-left" data-pos="1">
       <div class="nameplate" id="plate1"></div>
       <div class="hand hand-side" id="hand1"></div>
       <div class="bubble" id="bubble1"></div>
+      <div class="shown" id="shown1"></div>
     </div>
     <div class="seat-area pos-right" data-pos="3">
       <div class="nameplate" id="plate3"></div>
       <div class="hand hand-side" id="hand3"></div>
       <div class="bubble" id="bubble3"></div>
+      <div class="shown" id="shown3"></div>
     </div>
 
     <div class="center-area">
@@ -120,6 +123,7 @@
 
     <div class="seat-area pos-bottom" data-pos="0">
       <div class="bubble" id="bubble0"></div>
+      <div class="shown" id="shown0"></div>
       <div class="hand hand-bottom" id="hand0"></div>
       <div class="nameplate" id="plate0"></div>
     </div>
@@ -134,6 +138,10 @@
     <div class="panel-block" id="trickStatsBlock">
       <div class="panel-title">This deal</div>
       <div class="trick-stats" id="trickStats"></div>
+    </div>
+    <div class="panel-block hidden" id="combosBlock">
+      <div class="panel-title">Combinations</div>
+      <div class="combos" id="combos"></div>
     </div>
     <div class="panel-block hidden" id="lastTrickBlock">
       <div class="panel-title">Last trick</div>
@@ -199,6 +207,6 @@
   <div class="toast hidden" id="toast"></div>
 </section>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>

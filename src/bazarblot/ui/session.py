@@ -136,6 +136,8 @@ class GameSession:
         self.events.append(f"Deal {deal_number}: dealer is seat {self.match.dealer}")
 
     def next_deal(self) -> None:
+        if self.match.finished:
+            raise SessionError("the match is over; start a new game")
         if self.deal.phase == Phase.TERMINAL:
             self._redeal_attempt = 0
         elif self.deal.phase == Phase.ABORTED:

@@ -100,7 +100,7 @@ def test_carre_trump_values_are_blotstar_specific() -> None:
 
 
 def test_carre_notrump_values_are_blotstar_specific() -> None:
-    for rank, expected in (("A", 190), ("J", 100), ("10", 100), ("K", 100), ("Q", 100), ("9", 0)):
+    for rank, expected in (("A", 190), ("J", 100), ("10", 100), ("K", 100), ("Q", 100)):
         hand = cards(f"{rank}C", f"{rank}D", f"{rank}H", f"{rank}S")
         melds = detect_hand_melds(hand, 0, "NT", RULES)
         carres = [m for m in melds if m.kind == "carre"]
@@ -110,11 +110,23 @@ def test_carre_notrump_values_are_blotstar_specific() -> None:
         )
 
 
-def test_carre_of_sevens_and_eights_worth_nothing() -> None:
-    for rank in ("7", "8"):
+def test_zero_value_carres_are_not_combinations() -> None:
+    """Four 7s or 8s (and four 9s under NT) are worth 0: not a combination at all."""
+    for rank, contract in (("7", "S"), ("8", "S"), ("7", "NT"), ("8", "NT"), ("9", "NT")):
         hand = cards(f"{rank}C", f"{rank}D", f"{rank}H", f"{rank}S")
-        melds = detect_hand_melds(hand, 0, "S", RULES)
-        assert melds[0].value == 0
+        assert not [m for m in detect_hand_melds(hand, 0, contract, RULES) if m.kind == "carre"]
+
+
+def test_zero_value_carre_does_not_win_the_comparison() -> None:
+    """Regression: four 7s used to win by category (carre beats sequence) and wipe out the other
+    team's Hundred."""
+    h0 = cards("7C", "7D", "7H", "7S", "AC", "AD", "AH", "KS")
+    h1 = cards("8C", "9C", "10C", "JC", "8D", "9D", "8H", "9H")  # Fifty to the J
+    rest = sorted(set(range(32)) - h0 - h1)
+    h2, h3 = frozenset(rest[:8]), frozenset(rest[8:])
+    result = resolve_combinations((h0, h1, h2, h3), "S", RULES, leader_seat=0)
+    assert result.winning_meld is not None and result.winning_meld.kind == "sequence"
+    assert result.winning_team == 1
 
 
 # ---------------------------------------------------------------- blot-reblot

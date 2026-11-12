@@ -20,7 +20,7 @@ RULES = load_default()
 N_DEALS = 1000
 
 # Regenerate by running: python -m tests.test_golden
-GOLDEN_HASH = "4b37097ebc8b9e28335ea1c3bc03803be2fe121ab1dca1a94ea2d3f1f9aabdf6"
+GOLDEN_HASH = "167a16094bfe78888ae600590a4a07c807974c4668f7468913e031315d082c56"
 
 
 def _deal_fingerprint(d: Deal) -> str:

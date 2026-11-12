@@ -286,6 +286,7 @@ async function applyUpdate(data) {
     const t = tricks[tricks.length - 1];
     renderHands(data.state); // the card just played leaves the hand before the trick is shown
     renderPlates(data.state);
+    renderCallBubbles(data.state);
     renderTrick(t.plays, t.winner);
     await sleep(scaled(DELAY.trickShow));
     if (gen !== app.generation) return;
@@ -577,6 +578,15 @@ function renderHands(state) {
 
 function renderBubbles(data) {
   const state = data.state;
+  if (state.phase === "PLAY" || state.phase === "TERMINAL") {
+    renderCallBubbles(state);
+    return;
+  }
+  app.callsSeen = 0;
+  for (const k of Object.keys(bubbleTimers)) {
+    clearTimeout(bubbleTimers[k]); // a combination call from the last deal must not linger
+    bubbleTimers[k] = null;
+  }
   const last = {};
   if (state.phase === "AUCTION" || state.phase === "ABORTED") {
     for (const e of data.bid_log || []) last[e.seat] = e;
@@ -603,6 +613,88 @@ function renderBubbles(data) {
     b.dataset.html = html;
     b.innerHTML = html;
     b.className = cls;
+  }
+}
+
+// ---- combination calls (core/announcements.py): class at hand 1, show at hand 2, blot/reblot
+
+const CALL_TEXT = { tierce: "Tierce!", fifty: "Fifty!", hundred: "Hundred!", "4x": "4×!", blot: "Blot!", reblot: "Reblot!" };
+const bubbleTimers = {};
+
+function meldText(m) {
+  return m.kind === "sequence" ? `${m.label} ${suitHtml(m.suit)}` : m.label;
+}
+function callHtml(a) {
+  if (a.kind === "show") return "Shows " + a.melds.map(meldText).join(" + ");
+  return CALL_TEXT[a.kind] || a.kind;
+}
+
+/** Pop a bubble for each call made since the last render. */
+function renderCallBubbles(state) {
+  const calls = state.announcements || [];
+  const key = `${app.sessionId}:${state.deal_number}`;
+  if (app.callKey !== key) {
+    app.callKey = key;
+    app.callsSeen = 0;
+  }
+  for (let s = 0; s < 4; s++) {
+    const b = $(`bubble${pos(s)}`);
+    if (!b.classList.contains("call")) b.className = "bubble"; // auction calls end with the auction
+  }
+  for (const a of calls.slice(app.callsSeen)) {
+    const b = $(`bubble${pos(a.seat)}`);
+    b.innerHTML = callHtml(a);
+    b.className = "bubble";
+    void b.offsetWidth; // restart the pop animation
+    b.className = "bubble show call" + (a.kind === "blot" || a.kind === "reblot" ? " blot" : "");
+    clearTimeout(bubbleTimers[a.seat]);
+    bubbleTimers[a.seat] = setTimeout(() => {
+      b.className = "bubble";
+      bubbleTimers[a.seat] = null;
+    }, 2600);
+  }
+  app.callsSeen = calls.length;
+  renderShown(state);
+}
+
+/** Cards shown at hand 2 stay face up beside their owner while trick 2 is played. */
+function renderShown(state) {
+  const showing = state.phase === "PLAY" && (state.completed_tricks || []).length === 1;
+  for (let p = 0; p < 4; p++) $(`shown${p}`).innerHTML = "";
+  if (!showing) return;
+  for (const a of state.announcements || []) {
+    if (a.kind !== "show") continue;
+    const box = $(`shown${pos(a.seat)}`);
+    for (const m of a.melds) {
+      const g = document.createElement("div");
+      g.className = "shown-group";
+      g.innerHTML = `<div class="shown-label">${meldText(m)} <b>${m.value}</b></div>`;
+      const row = document.createElement("div");
+      row.className = "shown-cards";
+      m.cards.forEach((cid) => row.appendChild(cardEl(cid, { small: true })));
+      g.appendChild(row);
+      box.appendChild(g);
+    }
+  }
+}
+
+function renderCombos(state) {
+  const calls = state.announcements || [];
+  $("combosBlock").classList.toggle("hidden", !calls.length);
+  const box = $("combos");
+  box.innerHTML = "";
+  for (const a of calls) {
+    const row = document.createElement("div");
+    row.className = "combo-row";
+    const who = `<span class="${teamClass(teamOf(a.seat))}">${seatName(a.seat)}</span>`;
+    let text;
+    if (a.kind === "show") text = "shows " + a.melds.map((m) => `${meldText(m)} <b>${m.value}</b>`).join(", ");
+    else if (a.kind === "blot" || a.kind === "reblot") {
+      const c = cardInfo(a.card);
+      text = `${a.kind === "blot" ? "Blot" : "Reblot"} <span class="${c.red ? "red" : ""}">${c.rank}${c.symbol}</span>${a.kind === "reblot" ? " <b>20</b>" : ""}`;
+    } else text = `announces ${CALL_TEXT[a.kind].replace("!", "")}`;
+    row.innerHTML = `${who} ${text}`;
+    box.appendChild(row);
   }
 }
 
@@ -644,6 +736,7 @@ function renderCenter(state) {
 
 function renderSide(data) {
   renderAuctionGrid(data.bid_log || [], data.state);
+  renderCombos(data.state);
   const state = data.state;
   const tricks = state.completed_tricks || [];
   const won = [0, 0], pts = [0, 0];
@@ -788,6 +881,7 @@ function showResult(data) {
     `<div class="result-contract">${attName} bid ${bidHtml(c.level, c.contract_type, c.capot)}` +
     `${c.doubling !== "none" ? ` <span class="tag tag-red">${c.doubling}</span>` : ""} · needed ${c.level * 10}+${shutout ? " · " + shutout : ""}</div>` +
     `<table class="result-table"><tr><th></th><th>Cards</th><th>Combos</th><th>Score</th></tr>${row(us)}${row(them)}</table>` +
+    scoredCombosHtml(data.state) +
     matchHtml + button;
   $("resultOverlay").classList.remove("hidden");
   const next = $("nextDealBtn");
@@ -800,6 +894,18 @@ function showResult(data) {
       if (gen === app.generation && app.autoplay && !$("resultOverlay").classList.contains("hidden")) nextDeal();
     }, scaled(3000));
   }
+}
+
+function scoredCombosHtml(state) {
+  const items = [];
+  for (const a of state.announcements || []) {
+    if (a.kind === "show") for (const m of a.melds) items.push([a.seat, `${meldText(m)}`, m.value]);
+    if (a.kind === "reblot") items.push([a.seat, "Blot-Reblot", 20]);
+  }
+  if (!items.length) return '<div class="result-combos none">No combinations</div>';
+  return '<div class="result-combos">' + items
+    .map(([seat, txt, v]) => `<div><span class="${teamClass(teamOf(seat))}">${seatName(seat)}</span> ${txt} <b>+${v}</b></div>`)
+    .join("") + "</div>";
 }
 
 // ================================================================ replay
@@ -830,6 +936,8 @@ function renderReplay(data) {
   renderPlates(state);
   renderHands(state);
   for (let p = 0; p < 4; p++) $(`bubble${p}`).className = "bubble";
+  app.callsSeen = (state.announcements || []).length; // no bubbles while scrubbing
+  renderShown(state);
   renderCenter(state);
   renderSide({ bid_log: [], state });
   $("bidPanel").classList.add("hidden");

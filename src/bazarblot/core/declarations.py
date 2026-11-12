@@ -122,7 +122,10 @@ def _find_carres(
     )
     for rank in RANKS:
         cards = tuple(card_id(s, rank) for s in SUITS)
-        if all(c in hand for c in cards):
+        # A carre worth 0 (7s and 8s; 9s under NT) is not a combination at all. Detecting it
+        # would let it win the comparison by category (carre beats any sequence) and wipe out
+        # the other team's real combinations.
+        if all(c in hand for c in cards) and table[rank] > 0:
             melds.append(
                 Meld(
                     kind="carre",

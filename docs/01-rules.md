@@ -467,6 +467,21 @@ protocol adds a contingent, turn-order-dependent action window that the informat
 worth far more as a clean ablation — *does self-play discover announce-then-withhold, and does it
 discover the defensive counter-announcement?* — than as noise in the first learning run.
 
+**Timing under that staging** (`core/announcements.py`): nobody chooses, but the calls still happen
+at their proper moments, and that timing decides what the table knows. Each seat holding a
+comparable combination announces its class (Tierce / Fifty / Hundred / 4x) with its trick-1 card;
+the seats of the team that wins the comparison show their combinations' cards with their trick-2
+card (the losing team shows nothing); the holder of the trump K+Q says Blot with the first of the
+two and Reblot with the second. Scoring is unchanged. The UI follows this timeline. **The agents'
+observation does not yet**: `env/infoset.py` still gives every seat each seat's best class, top card,
+trump bit and blot-reblot holding from the first card of play, which is more than the table knows.
+Switching it to this timeline changes the observation (a new `OBS_VERSION`) and needs retraining.
+
+A four-of-a-kind worth 0 (7s and 8s; 9s under `NT`) is **not a combination**: it is not announced
+and does not enter the comparison. (Until 2026-11-12 the engine detected it, and it won the
+comparison by category, wiping out the other team's real combinations: 6 of the 1,000 golden deals
+changed when this was fixed.)
+
 ---
 
 ## 7. Scoring — **this is where Blot Star differs most from classical Belote**

@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from bazarblot.core.announcements import Announcement, announcements
 from bazarblot.core.auction import (
     BidAction,
     ContraAction,
@@ -26,6 +27,7 @@ from bazarblot.core.auction import (
 )
 from bazarblot.core.cards import card_label
 from bazarblot.core.deal import Deal, Phase
+from bazarblot.core.declarations import Meld
 from bazarblot.core.play import PlayCardAction
 
 BidKind = Literal["pass", "bid", "contra", "recontra"]
@@ -162,6 +164,47 @@ def _legal_action_summaries(d: Deal, seat: int) -> list[dict[str, Any]]:
 
 
 @dataclass(frozen=True, slots=True)
+class MeldView:
+    kind: str  # "sequence" | "carre"
+    suit: str | None
+    cards: tuple[int, ...]
+    value: int
+    label: str  # e.g. "Fifty to the K", "Four Jacks"
+
+
+@dataclass(frozen=True, slots=True)
+class AnnouncementView:
+    """A public combination call (`core/announcements.py`): a class at hand 1, a show at hand 2,
+    or blot / reblot with the card it was said with."""
+
+    seat: int
+    trick: int
+    kind: str  # tierce | fifty | hundred | 4x | show | blot | reblot
+    melds: tuple[MeldView, ...]
+    card: int | None
+
+
+_SEQUENCE_NAME = {3: "Tierce", 4: "Fifty"}
+_RANK_PLURAL = {"J": "Jacks", "9": "Nines", "A": "Aces", "10": "Tens", "K": "Kings", "Q": "Queens"}
+
+
+def _meld_view(m: Meld) -> MeldView:
+    if m.kind == "carre":
+        label = f"Four {_RANK_PLURAL.get(m.rank or '', m.rank or '')}"
+    else:
+        label = f"{_SEQUENCE_NAME.get(m.length, 'Hundred')} to the {m.rank}"
+    return MeldView(m.kind, m.suit, m.cards, m.value, label)
+
+
+def _announcement_view(a: Announcement) -> AnnouncementView:
+    return AnnouncementView(a.seat, a.trick, a.kind, tuple(_meld_view(m) for m in a.melds), a.card)
+
+
+def _announcements_view(d: Deal) -> tuple[AnnouncementView, ...]:
+    return tuple(_announcement_view(a) for a in announcements(d))
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerView:
     """What ONE seat is allowed to see. Never construct this with another seat's hand."""
 
@@ -179,6 +222,7 @@ class PlayerView:
     result: ResultView | None
     match_score: tuple[int, int]
     match_target: int
+    announcements: tuple[AnnouncementView, ...] = ()  # public combination calls so far
     legal_actions: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -202,6 +246,7 @@ def player_view(d: Deal, seat: int, match_score: tuple[int, int], match_target: 
         result=_result_view(d),
         match_score=match_score,
         match_target=match_target,
+        announcements=_announcements_view(d),
         legal_actions=_legal_action_summaries(d, seat) if to_act == seat else [],
     )
 
@@ -223,6 +268,7 @@ class FullStateView:
     result: ResultView | None
     match_score: tuple[int, int]
     match_target: int
+    announcements: tuple[AnnouncementView, ...] = ()
     legal_actions: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -243,6 +289,7 @@ def full_state_view(d: Deal, match_score: tuple[int, int], match_target: int) ->
         result=_result_view(d),
         match_score=match_score,
         match_target=match_target,
+        announcements=_announcements_view(d),
         legal_actions=_legal_action_summaries(d, to_act) if to_act is not None else [],
     )
 

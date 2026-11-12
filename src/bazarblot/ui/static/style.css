@@ -771,3 +771,41 @@ textarea { min-height: 120px; font-family: ui-monospace, Menlo, monospace; font-
   .suit-btn .sym { font-size: 22px; }
   .bid-panel { padding: 10px; }
 }
+
+/* ---------------------------------------------------------------- combinations */
+
+.bubble.call { background: linear-gradient(180deg, #fff3c4, var(--gold)); color: #2a1c02; font-family: "Cinzel", serif; letter-spacing: 0.04em; }
+.bubble.call .red { color: var(--card-red); }
+.bubble.call.blot { background: linear-gradient(180deg, #ffd9d9, #f08a8a); }
+.shown { position: absolute; display: flex; gap: 10px; z-index: 3; pointer-events: none; }
+.shown:empty { display: none; }
+.pos-top .shown { top: calc(100% + 54px); left: 50%; transform: translateX(-50%); }
+.pos-bottom .shown { bottom: calc(100% + 56px); left: 50%; transform: translateX(-50%); }
+.pos-left .shown { left: calc(100% + 14px); top: 62%; flex-direction: column; }
+.pos-right .shown { right: calc(100% + 14px); top: 62%; flex-direction: column; }
+.shown-group {
+  background: var(--panel);
+  border: 1px solid rgba(232, 184, 63, 0.5);
+  border-radius: 10px;
+  padding: 6px 8px;
+  box-shadow: var(--shadow), 0 0 18px rgba(232, 184, 63, 0.2);
+  animation: pop-in 0.35s ease;
+}
+.shown-label { font-size: 11px; font-weight: 700; color: var(--gold); margin-bottom: 5px; white-space: nowrap; }
+.shown-label .red { color: #ff6b6b; }
+.shown-label b { color: var(--ink); margin-left: 4px; }
+.shown-cards { display: flex; }
+.shown-cards .card { --card-w: 40px; }
+.shown-cards .card + .card { margin-left: -14px; }
+.combos { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.combo-row { color: var(--ink-dim); line-height: 1.35; }
+.combo-row .us { color: var(--us); font-weight: 700; }
+.combo-row .them { color: var(--them); font-weight: 700; }
+.combo-row .red { color: #ff6b6b; }
+.combo-row b { color: var(--gold); }
+.result-combos { display: flex; flex-direction: column; gap: 4px; margin: -6px 0 16px; font-size: 14px; color: var(--ink-dim); }
+.result-combos .us { color: var(--us); font-weight: 700; }
+.result-combos .them { color: var(--them); font-weight: 700; }
+.result-combos b { color: var(--gold); }
+.result-combos .red { color: #ff6b6b; }
+.result-combos.none { color: var(--ink-faint); font-size: 13px; }
