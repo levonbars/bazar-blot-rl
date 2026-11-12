@@ -73,11 +73,15 @@ class NewGameRequest(BaseModel):
     human_seat: int | None = None
     match_seed: int | None = None
     bot: str | None = None  # see `ui/opponents.py`; default: the preferred trained checkpoint
+    autoplay: bool = True
+    """Run the bots' turns before replying (play mode). The browser UI sends False and steps the
+    bots itself with `bot_step`, so each bot move can be shown one at a time."""
 
 
 class ActionRequest(BaseModel):
     seat: int
     action: dict[str, Any]
+    autoplay: bool = True  # as in `NewGameRequest`
 
 
 class NewReplayRequest(BaseModel):
@@ -106,7 +110,7 @@ def new_game(req: NewGameRequest) -> dict[str, Any]:
     try:
         bot = req.bot or default_bot(load_default())
         session = STORE.new_game(req.mode, req.human_seat, req.match_seed, bot)  # type: ignore[arg-type]
-        if session.mode == "play":
+        if session.mode == "play" and req.autoplay:
             # The opener isn't necessarily the human — advance any bot turns that come
             # before the human's first move, same as after every subsequent action.
             session.autoplay_bots()
@@ -158,7 +162,7 @@ def post_action(session_id: str, req: ActionRequest) -> dict[str, Any]:
         session = STORE.get_game(session_id)
         action = decode_action(req.action)
         session.apply_human_action(req.seat, action)
-        if session.mode == "play":
+        if session.mode == "play" and req.autoplay:
             session.autoplay_bots()
     except (SessionError, ActionDecodeError, IllegalActionError, DealError) as exc:
         raise _http_error(exc) from exc
@@ -188,11 +192,11 @@ def autoplay(session_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/game/{session_id}/next_deal")
-def next_deal(session_id: str) -> dict[str, Any]:
+def next_deal(session_id: str, autoplay: bool = True) -> dict[str, Any]:
     try:
         session = STORE.get_game(session_id)
         session.next_deal()
-        if session.mode == "play":
+        if session.mode == "play" and autoplay:
             session.autoplay_bots()
     except (SessionError, DealError) as exc:
         raise _http_error(exc) from exc

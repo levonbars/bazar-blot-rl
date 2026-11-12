@@ -165,3 +165,32 @@ def test_replay_rejects_mismatched_rules_hash() -> None:
     }
     res = client.post("/api/replay", json={"log": bogus_log})
     assert res.status_code == 404
+
+
+def test_play_without_autoplay_lets_the_client_step_each_bot() -> None:
+    """The browser UI asks the server not to run the bots, then steps them one at a time so each
+    move can be shown; every bot turn must be reachable with `bot_step`."""
+    res = client.post(
+        "/api/game",
+        json={
+            "mode": "play",
+            "human_seat": 0,
+            "match_seed": 11,
+            "bot": "simple",
+            "autoplay": False,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    sid = data["session_id"]
+    steps = 0
+    while data["is_bot_turn"]:
+        n = len(data["bid_log"])
+        data = client.post(f"/api/game/{sid}/bot_step").json()
+        assert len(data["bid_log"]) == n + 1  # exactly one move per step
+        steps += 1
+    assert data["state"]["to_act"] == 0
+    action = {"seat": 0, "action": {"type": "pass"}, "autoplay": False}
+    after = client.post(f"/api/game/{sid}/action", json=action).json()
+    assert after["is_bot_turn"] or after["state"]["phase"] != "AUCTION"
+    assert len(after["bid_log"]) == len(data["bid_log"]) + 1  # the bots did not move

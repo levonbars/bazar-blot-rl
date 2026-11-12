@@ -4,98 +4,201 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Bazar Blot</title>
-<link rel="stylesheet" href="/static/style.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/style.css?v=6" />
 </head>
 <body>
 
-<header id="topbar">
-  <h1>Bazar Blot <span class="subtitle">local UI &middot; M1.5</span></h1>
-  <div id="matchInfo" class="hidden">
-    <span id="matchScore"></span>
-    <span id="matchTarget"></span>
-  </div>
-</header>
+<!-- ============================================================ title screen -->
+<section id="lobby" class="screen">
+  <div class="lobby-bg"></div>
+  <div class="lobby-inner">
+    <div class="logo">
+      <div class="logo-suits"><span>♠</span><span class="red">♥</span><span>♣</span><span class="red">♦</span></div>
+      <h1>Bazar Blot</h1>
+      <div class="logo-sub">Armenian Bazaar Belote</div>
+    </div>
 
-<section id="lobby">
-  <div class="lobby-card">
-    <h2>Watch</h2>
-    <p>Four bots play each other. Full state visible — the debug view.</p>
-    <label>Bots <select id="watchBot" class="bot-select"></select></label>
-    <label>Match seed (optional) <input id="watchSeed" type="number" placeholder="random" /></label>
-    <button id="startWatch">Start watching</button>
-  </div>
-  <div class="lobby-card">
-    <h2>Play</h2>
-    <p>You take one seat; bots play your partner and both opponents. You only see what your seat would see.</p>
-    <label>Your seat
-      <select id="playSeat">
-        <option value="0">Seat 0 (South)</option>
-        <option value="1">Seat 1 (West)</option>
-        <option value="2">Seat 2 (North)</option>
-        <option value="3">Seat 3 (East)</option>
-      </select>
-    </label>
-    <label>Bots <select id="playBot" class="bot-select"></select></label>
-    <label>Match seed (optional) <input id="playSeed" type="number" placeholder="random" /></label>
-    <button id="startPlay">Start playing</button>
-  </div>
-  <div class="lobby-card">
-    <h2>Replay</h2>
-    <p>Paste a replay log (from "Copy replay log" after a deal finishes) and step through it.</p>
-    <textarea id="replayInput" placeholder='{"rules_hash": "...", "match_seed": 1, ...}'></textarea>
-    <button id="startReplay">Load replay</button>
+    <div class="mode-tabs" role="tablist">
+      <button class="mode-tab active" data-mode="play">Play</button>
+      <button class="mode-tab" data-mode="watch">Watch</button>
+      <button class="mode-tab" data-mode="replay">Replay</button>
+    </div>
+
+    <div class="mode-panel" id="panel-play">
+      <p class="mode-desc">You and an AI partner against two AI opponents. First team to the target wins.</p>
+      <div class="field">
+        <span class="field-label">Your seat</span>
+        <div class="seat-picker" id="seatPicker">
+          <button data-seat="0" class="active">South</button>
+          <button data-seat="1">West</button>
+          <button data-seat="2">North</button>
+          <button data-seat="3">East</button>
+        </div>
+      </div>
+      <label class="field">
+        <span class="field-label">Opponents &amp; partner</span>
+        <select id="playBot" class="bot-select"></select>
+      </label>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label class="field"><span class="field-label">Match seed</span>
+          <input id="playSeed" type="number" placeholder="random" /></label>
+      </details>
+      <button id="startPlay" class="btn btn-gold btn-big">Deal me in</button>
+    </div>
+
+    <div class="mode-panel hidden" id="panel-watch">
+      <p class="mode-desc">Four AI players at the table, all hands face up.</p>
+      <label class="field">
+        <span class="field-label">Players</span>
+        <select id="watchBot" class="bot-select"></select>
+      </label>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label class="field"><span class="field-label">Match seed</span>
+          <input id="watchSeed" type="number" placeholder="random" /></label>
+      </details>
+      <button id="startWatch" class="btn btn-gold btn-big">Start watching</button>
+    </div>
+
+    <div class="mode-panel hidden" id="panel-replay">
+      <p class="mode-desc">Paste a replay log (copied from the in-game menu after a deal) to step through it.</p>
+      <textarea id="replayInput" placeholder='{"rules_hash": "...", "match_seed": 1, ...}'></textarea>
+      <button id="startReplay" class="btn btn-gold btn-big">Load replay</button>
+    </div>
   </div>
 </section>
 
-<section id="game" class="hidden">
- <div id="mainColumn">
-  <div id="table">
-    <div class="seat seat-2" id="seat2"><div class="seat-label">Seat 2 (North)</div><div class="hand" id="hand2"></div></div>
-    <div class="seat seat-1" id="seat1"><div class="seat-label">Seat 1 (West)</div><div class="hand" id="hand1"></div></div>
-    <div class="center">
-      <div id="contractBanner"></div>
-      <div id="trick" class="trick"></div>
-      <div id="dealBanner"></div>
-    </div>
-    <div class="seat seat-3" id="seat3"><div class="seat-label">Seat 3 (East)</div><div class="hand" id="hand3"></div></div>
-    <div class="seat seat-0" id="seat0"><div class="seat-label">Seat 0 (South)</div><div class="hand" id="hand0"></div></div>
-  </div>
+<!-- ============================================================ game screen -->
+<section id="game" class="screen hidden">
+  <div class="table-felt"></div>
 
-  <div id="controls">
-    <div id="watchControls" class="hidden">
-      <button id="stepBtn">Step</button>
-      <button id="autoplayBtn">Autoplay</button>
-    </div>
-    <div id="auctionPanel" class="hidden">
-      <button id="passBtn">Pass</button>
-      <button id="contraBtn">Contra</button>
-      <button id="recontraBtn">Recontra</button>
-      <div id="bidForm">
-        <input id="bidLevel" type="number" />
-        <select id="bidType"></select>
-        <label><input id="bidCapot" type="checkbox" /> Capot</label>
-        <button id="bidBtn">Bid</button>
+  <!-- top HUD -->
+  <header class="hud">
+    <div class="hud-left">
+      <button id="menuBtn" class="icon-btn" title="Menu">☰</button>
+      <div class="scoreboard" id="scoreboard">
+        <div class="team team-us"><span class="team-name" id="teamNameUs">Us</span><span class="team-score" id="scoreUs">0</span></div>
+        <div class="score-sep">
+          <div class="target" id="targetLabel">to 101</div>
+          <div class="progress"><div class="bar bar-us" id="barUs"></div><div class="bar bar-them" id="barThem"></div></div>
+        </div>
+        <div class="team team-them"><span class="team-score" id="scoreThem">0</span><span class="team-name" id="teamNameThem">Them</span></div>
       </div>
     </div>
-    <button id="nextDealBtn" class="hidden">Next deal</button>
-    <button id="copyReplayBtn" class="hidden">Copy replay log</button>
-    <div id="replayControls" class="hidden">
-      <button id="replayPrev">&larr; Prev</button>
-      <span id="replayPos"></span>
-      <button id="replayNext">Next &rarr;</button>
+    <div class="hud-center" id="dealLabel">Deal 1</div>
+    <div class="hud-right">
+      <div class="contract-badge hidden" id="contractBadge"></div>
+    </div>
+  </header>
+
+  <!-- the table -->
+  <main class="table" id="table">
+    <div class="seat-area pos-top" data-pos="2">
+      <div class="nameplate" id="plate2"></div>
+      <div class="hand hand-top" id="hand2"></div>
+      <div class="bubble" id="bubble2"></div>
+    </div>
+    <div class="seat-area pos-left" data-pos="1">
+      <div class="nameplate" id="plate1"></div>
+      <div class="hand hand-side" id="hand1"></div>
+      <div class="bubble" id="bubble1"></div>
+    </div>
+    <div class="seat-area pos-right" data-pos="3">
+      <div class="nameplate" id="plate3"></div>
+      <div class="hand hand-side" id="hand3"></div>
+      <div class="bubble" id="bubble3"></div>
+    </div>
+
+    <div class="center-area">
+      <div class="trick-zone" id="trickZone"></div>
+      <div class="center-msg" id="centerMsg"></div>
+    </div>
+
+    <div class="seat-area pos-bottom" data-pos="0">
+      <div class="bubble" id="bubble0"></div>
+      <div class="hand hand-bottom" id="hand0"></div>
+      <div class="nameplate" id="plate0"></div>
+    </div>
+  </main>
+
+  <!-- side panel: auction + tricks -->
+  <aside class="side-panel" id="sidePanel">
+    <div class="panel-block">
+      <div class="panel-title">Auction</div>
+      <table class="auction-grid" id="auctionGrid"></table>
+    </div>
+    <div class="panel-block" id="trickStatsBlock">
+      <div class="panel-title">This deal</div>
+      <div class="trick-stats" id="trickStats"></div>
+    </div>
+    <div class="panel-block hidden" id="lastTrickBlock">
+      <div class="panel-title">Last trick</div>
+      <div class="last-trick" id="lastTrick"></div>
+    </div>
+  </aside>
+
+  <!-- bottom action dock -->
+  <div class="dock" id="dock">
+    <div class="bid-panel hidden" id="bidPanel">
+      <div class="bid-title" id="bidTitle">Your bid</div>
+      <div class="bid-row" id="bidRow">
+        <div class="level-stepper">
+          <button class="step-btn" id="levelDown">−</button>
+          <div class="level-display"><span id="levelValue">8</span><small>level</small></div>
+          <button class="step-btn" id="levelUp">+</button>
+        </div>
+        <div class="suit-buttons" id="suitButtons"></div>
+        <label class="capot-toggle" id="capotToggle"><input type="checkbox" id="bidCapot" /><span>Capot</span></label>
+      </div>
+      <div class="bid-actions">
+        <button class="btn btn-pass" id="passBtn">Pass</button>
+        <button class="btn btn-red hidden" id="contraBtn">Contra ×2</button>
+        <button class="btn btn-red hidden" id="recontraBtn">Recontra ×4</button>
+      </div>
+    </div>
+
+    <div class="watch-controls hidden" id="watchControls">
+      <button class="btn btn-ghost" id="stepBtn">Step ▸</button>
+      <button class="btn btn-gold" id="playPauseBtn">▶ Play</button>
+      <div class="speed"><span>Speed</span>
+        <input type="range" id="speedRange" min="0" max="4" step="1" value="2" />
+      </div>
+    </div>
+
+    <div class="replay-controls hidden" id="replayControls">
+      <button class="btn btn-ghost" id="replayStart">⏮</button>
+      <button class="btn btn-ghost" id="replayPrev">◂ Prev</button>
+      <span class="replay-pos" id="replayPos"></span>
+      <button class="btn btn-gold" id="replayNext">Next ▸</button>
+      <button class="btn btn-ghost" id="replayEnd">⏭</button>
+    </div>
+
+    <div class="turn-hint hidden" id="turnHint"></div>
+  </div>
+
+  <!-- overlays -->
+  <div class="overlay hidden" id="resultOverlay">
+    <div class="result-card" id="resultCard"></div>
+  </div>
+
+  <div class="overlay hidden" id="menuOverlay">
+    <div class="menu-card">
+      <h2>Menu</h2>
+      <button class="btn btn-gold" id="resumeBtn">Resume</button>
+      <button class="btn btn-ghost" id="copyReplayBtn">Copy replay log</button>
+      <button class="btn btn-ghost" id="toggleSideBtn">Hide side panel</button>
+      <button class="btn btn-ghost" id="quitBtn">Quit to title</button>
+      <div class="menu-meta" id="menuMeta"></div>
     </div>
   </div>
- </div>
 
-  <div id="sidebar">
-    <div id="resultPanel"></div>
-    <h3>Bid history</h3>
-    <ul id="bidLog"></ul>
-    <h3>Events</h3>
-    <ul id="eventLog"></ul>
-  </div>
+  <div class="toast hidden" id="toast"></div>
 </section>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>
