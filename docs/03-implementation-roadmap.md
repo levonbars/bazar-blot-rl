@@ -1330,6 +1330,37 @@ training only) instead of mostly the played-out result, i.e. a small GAE lambda 
 decisions; this is how bridge-bidding work makes partnership bidding learnable (score the contract
 from all hands), with no teacher.
 
+**Throughput, and a data bug it exposed (2026-11-12).**
+
+- *Vectorised update* (`learn/ppo.py::prepare_batch`/`score_batch`): each decision's masks and
+  targets are computed once per update and minibatches are scored with tensor operations,
+  replacing a per-decision Python call repeated every epoch. Checked against the per-sample
+  scoring on card plays, passes, doubles and bids. 10,556 decisions, 4 epochs: 8.2 s -> 1.5 s.
+- *Parallel rollouts* (`learn/parallel.py`, `--workers N`): worker processes play disjoint shuffle
+  ranges and send results back as stacked arrays (sending ~40k small objects cost as much as
+  playing the deals); the main process assigns critic values and advantages. Rollouts: 75 deals/s
+  serial, ~320 deals/s with 8 workers (8 independent processes reach ~440 together; the rest is
+  pipe transfer of ~220 MB per 1,024 shuffles). A training iteration of 1,024 shuffles takes ~4-5 s,
+  against ~7.4 s for 256 before: about 7x end-to-end, ~1M deals/hour.
+- **Bug: consecutive iterations replayed almost the same shuffles.** The rollout base seed was
+  `seed * 1_000_003 + iteration` and shuffle `i` used `base + i`, so iteration k+1 reused 255 of
+  iteration k's 256 shuffles: a 400 x 256 run trained on ~655 distinct deals, not ~102k. This
+  affected every M7 run (all results above). Evaluation always used fresh, separate seeds, so the
+  reported numbers measure generalisation honestly, but the agents learned from a tiny, heavily
+  repeated set of deals. Fixed (`train.py::rollout_seed_for`, iterations disjoint,
+  regression-tested).
+
+**Evaluation additions (step 2).** Every training evaluation now also reports (a) card-play
+yardsticks under the heuristic's bidding, so both sides face identical auctions: learned play vs
+random play, vs heuristic play, and vs PIMC endgame play (10 worlds, exact solve from 4 cards
+left). Measured ladder, 150-400 pairs: heuristic play beats random play by +4.1 (+3.2, +4.9);
+PIMC endgame play beats heuristic play by +2.1 (+1.2, +3.2); the scratch1/scratch2 learned play
+beats random play by only +1.7/+1.9 and loses to heuristic play by -2.8/-2.1. (b) The
+partner-support probe (`learn/signaling.py::measure_partner_support`): when partner holds the
+standing bid, pass / support / own-suit rates by aces held, the support gap (support rate with 2+
+aces minus with none) and raise sizes. scratch1 final: gap +0.04, all raises +1; scratch2 final:
+gap +0.12 (support 4% with no ace, 16% with 2+), all raises +1.
+
 Full project suite passes (`pytest`, 387 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs

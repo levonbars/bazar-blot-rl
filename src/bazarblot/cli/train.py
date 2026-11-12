@@ -66,6 +66,12 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     )
     p.add_argument("--heldout-pairs", type=int, default=100)
     p.add_argument("--signaling-deals", type=int, default=200)
+    p.add_argument("--play-eval-pairs", type=int, default=150)
+    p.add_argument("--no-pimc-eval", action="store_true")
+    p.add_argument("--support-deals", type=int, default=200)
+    p.add_argument(
+        "--workers", type=int, default=0, help="rollout worker processes (0 = main process)"
+    )
     p.add_argument("--opponent-prob", type=float, default=0.3)
     p.add_argument("--snapshot-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=20)
@@ -98,6 +104,10 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         heldout_offsets=tuple(int(x) for x in args.heldout_offsets.split(",") if x),
         heldout_pairs=args.heldout_pairs,
         signaling_deals=args.signaling_deals,
+        play_eval_pairs=args.play_eval_pairs,
+        pimc_eval=not args.no_pimc_eval,
+        support_deals=args.support_deals,
+        n_workers=args.workers,
         opponent_prob=args.opponent_prob,
         snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,

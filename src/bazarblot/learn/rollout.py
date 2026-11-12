@@ -17,6 +17,7 @@ when the deal does, with reward 0 at every step except the last, which carries t
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -294,11 +295,46 @@ def collect_rollout(
     auctions breaks the symmetry and keeps real bid/play outcomes flowing into training data
     throughout, independent of what the learner's own policy has drifted toward."""
     rng = random.Random(seed)
-    all_transitions: list[Transition] = []
+    trajectories, stats = play_rollout_deals(
+        rules,
+        space,
+        learner,
+        range(n_deals),
+        seed,
+        rng,
+        opponent_pool=opponent_pool,
+        opponent_prob=opponent_prob,
+        forced_bid_prob=forced_bid_prob,
+        bid_agent=bid_agent,
+        forced_contra_prob=forced_contra_prob,
+        reward_scale=reward_scale,
+    )
+    return finalize_rollout(trajectories, critic, gamma, lam), stats
+
+
+def play_rollout_deals(
+    rules: RuleConfig,
+    space: ActionSpace,
+    learner: PolicyValueNet,
+    deal_indices: Sequence[int],
+    seed: int,
+    rng: random.Random,
+    opponent_pool: list[Opponent] | None = None,
+    opponent_prob: float = 0.0,
+    forced_bid_prob: float = 0.0,
+    bid_agent: Agent | None = None,
+    forced_contra_prob: float = 0.0,
+    reward_scale: float = SQUASH_SCALE,
+) -> tuple[list[list[Transition]], RolloutStats]:
+    """The deal-playing half of `collect_rollout`: plays shuffle `i` (deal seed `seed + i`,
+    dealer `i % 4`) for every `i` in `deal_indices` and returns each learner seat's trajectory
+    with terminal rewards and outcome labels filled in, but no critic values or advantages yet
+    (`finalize_rollout`). Split out so `learn/parallel.py` can run it in worker processes on
+    disjoint index ranges; `rng` decides opponent sampling."""
     trajectories: list[list[Transition]] = []
     stats = RolloutStats()
 
-    for i in range(n_deals):
+    for i in deal_indices:
         dealer = i % 4
         deal_seed_value = seed + i
         use_opponent = bool(opponent_pool) and rng.random() < opponent_prob
@@ -351,12 +387,40 @@ def collect_rollout(
                 for t in seat_transitions:
                     t.outcome_target = label
                 trajectories.append(seat_transitions)
-                all_transitions.extend(seat_transitions)
                 stats.n_transitions += len(seat_transitions)
 
+    return trajectories, stats
+
+
+def finalize_rollout(
+    trajectories: list[list[Transition]],
+    critic: CentralCritic | None,
+    gamma: float,
+    lam: float,
+) -> list[Transition]:
+    """Baselines (the centralized critic's, if given) and per-trajectory GAE; returns the flat
+    transition list in trajectory order."""
+    all_transitions = [t for traj in trajectories for t in traj]
     if critic is not None and all_transitions:
         _assign_critic_values(critic, all_transitions)
     for seat_transitions in trajectories:
         _gae(seat_transitions, gamma, lam)
+    return all_transitions
 
-    return all_transitions, stats
+
+def merge_stats(parts: Sequence[RolloutStats]) -> RolloutStats:
+    """Combine the stats of several `play_rollout_deals` calls (e.g. one per worker)."""
+    out = RolloutStats()
+    for p in parts:
+        out.n_deals += p.n_deals
+        out.n_aborted += p.n_aborted
+        out.n_transitions += p.n_transitions
+        out.n_opponent_deals += p.n_opponent_deals
+        out.n_contested_completed += p.n_contested_completed
+        out.n_learner_declared_contested += p.n_learner_declared_contested
+        out.n_capped += p.n_capped
+        out.raw_margins.extend(p.raw_margins)
+        out.selfplay_levels.extend(p.selfplay_levels)
+        out.n_selfplay_made += p.n_selfplay_made
+        out.n_selfplay_doubled += p.n_selfplay_doubled
+    return out

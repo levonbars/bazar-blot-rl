@@ -152,3 +152,94 @@ def _probe(
     card_mask = torch.from_numpy(mask[space.play_start :])
     picks = out["card"].masked_fill(~card_mask, float("-inf")).argmax(dim=-1)
     return gain, bool(picks[0] != picks[1])
+
+
+@dataclass(frozen=True, slots=True)
+class PartnerSupportReport:
+    """What a seat does when PARTNER holds the standing bid and a bid is legal, split by how many
+    aces the seat holds. The convention the project owner described (answer partner's bid with
+    aces, +1 or +2, before bidding one's own suit) would show as support rising with aces and raise
+    sizes other than +1; agents that bid as individuals show flat support and own-suit bids."""
+
+    n_decisions: int
+    by_aces: dict[int, tuple[int, float, float, float]]
+    """aces held (3 = 3 or more) -> (n, pass rate, support-partner's-suit rate, other-suit rate)"""
+    support_raise_sizes: dict[int, int]
+
+    @property
+    def support_gap(self) -> float | None:
+        """Support rate with 2+ aces minus with 0 aces: ~0 means support ignores aces."""
+        lo = self.by_aces.get(0)
+        hi = [v for k, v in self.by_aces.items() if k >= 2]
+        if lo is None or lo[0] == 0 or not hi or sum(v[0] for v in hi) == 0:
+            return None
+        n_hi = sum(v[0] for v in hi)
+        return sum(v[0] * v[2] for v in hi) / n_hi - lo[2]
+
+    def summary(self) -> str:
+        cells = "  ".join(
+            f"{k}{'+' if k == 3 else ''}A: n={v[0]} sup {v[2]:.2f} own {v[3]:.2f}"
+            for k, v in sorted(self.by_aces.items())
+        )
+        gap = self.support_gap
+        gap_s = f"{gap:+.3f}" if gap is not None else "n/a"
+        return f"{cells}  | support gap(2+A - 0A) {gap_s}  raise sizes {self.support_raise_sizes}"
+
+
+def measure_partner_support(
+    rules: RuleConfig,
+    space: ActionSpace,
+    net: PolicyValueNet,
+    n_deals: int = 400,
+    seed: int = 9,
+) -> PartnerSupportReport:
+    """Greedy self-play with `net` in all four seats; see `PartnerSupportReport`."""
+    from bazarblot.core.auction import BidAction
+    from bazarblot.core.cards import rank_of
+
+    was_training = net.training
+    net.eval()
+    agent = NNAgent(net, sample=False)
+    rng = random.Random(seed)
+    counts: dict[int, list[int]] = {}  # aces -> [n, pass, support, other]
+    sizes: dict[int, int] = {}
+    try:
+        for d in range(n_deals):
+            deal = Deal(rules, dealer=d % 4, hands=deal_hands(rng, rules), deal_id=d)
+            tracked = TrackedDeal(deal)
+            while deal.phase == Phase.AUCTION:
+                if len(tracked.auction_log) >= rules.auction.max_auction_steps:
+                    break
+                info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=d)
+                mask = legal_mask(info, space)
+                action_idx = agent.act(info, space, mask)
+                standing = info.auction_state.standing_bid
+                if (
+                    standing is not None
+                    and standing.seat == (info.seat + 2) % 4
+                    and mask[space.bid_start : space.play_start].any()
+                ):
+                    aces = min(3, sum(1 for c in info.hand if rank_of(c) == "A"))
+                    row = counts.setdefault(aces, [0, 0, 0, 0])
+                    row[0] += 1
+                    action = space.decode(action_idx)
+                    if isinstance(action, BidAction):
+                        if action.contract_type == standing.contract_type:
+                            row[2] += 1
+                            size = action.level - standing.level
+                            sizes[size] = sizes.get(size, 0) + 1
+                        else:
+                            row[3] += 1
+                    else:
+                        row[1] += 1
+                tracked.step(space.decode(action_idx))
+    finally:
+        net.train(was_training)
+    by_aces = {
+        k: (v[0], v[1] / v[0], v[2] / v[0], v[3] / v[0]) for k, v in counts.items() if v[0] > 0
+    }
+    return PartnerSupportReport(
+        n_decisions=sum(v[0] for v in counts.values()),
+        by_aces=by_aces,
+        support_raise_sizes=dict(sorted(sizes.items())),
+    )

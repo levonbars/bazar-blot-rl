@@ -20,9 +20,15 @@ from torch.utils.tensorboard import SummaryWriter
 from bazarblot.agents.base import Agent
 from bazarblot.agents.composed import ComposedAgent
 from bazarblot.agents.heuristic import HeuristicAgent
-from bazarblot.agents.nn.network import CentralCritic, apply_action_prior, build_network
+from bazarblot.agents.nn.network import (
+    CentralCritic,
+    PolicyValueNet,
+    apply_action_prior,
+    build_network,
+)
 from bazarblot.agents.nn.ppo_agent import NNAgent
 from bazarblot.agents.pass_bidder import PassBidder
+from bazarblot.agents.pimc import PIMCAgent
 from bazarblot.agents.random_agent import RandomAgent
 from bazarblot.core.deal import Phase
 from bazarblot.core.rules import RuleConfig, load_default
@@ -31,9 +37,10 @@ from bazarblot.eval.behavior import evaluate_behavior
 from bazarblot.eval.metrics import evaluate_pairs
 from bazarblot.learn.checkpoint import critic_from_payload, load_checkpoint, save_checkpoint
 from bazarblot.learn.opponent_pool import OpponentPool
+from bazarblot.learn.parallel import ParallelRollout
 from bazarblot.learn.ppo import PPOConfig, ppo_update
 from bazarblot.learn.rollout import Opponent, collect_rollout
-from bazarblot.learn.signaling import measure_signaling
+from bazarblot.learn.signaling import measure_partner_support, measure_signaling
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +103,18 @@ class TrainConfig:
     and logs the profile. Keep them DISJOINT from the offsets used in `baseline_opponents`, or the
     profile measures training opponents instead of generalisation."""
     heldout_pairs: int = 100
+    play_eval_pairs: int = 150
+    """Pairs for the card-play yardsticks at each evaluation (all under the heuristic's bidding,
+    so both sides face identical auctions): learned play vs random play, vs heuristic play, and
+    vs PIMC endgame play (`pimc_eval`). 0 disables them."""
+    pimc_eval: bool = True
+    """Include the PIMC yardstick (k=10 worlds, exact solve from 4 cards left; ~20 s per 150
+    pairs). It beats heuristic play by about +2, which beats random play by about +4."""
+    support_deals: int = 200
+    """Greedy self-play deals for the partner-support probe at each evaluation; 0 disables."""
+    n_workers: int = 0
+    """Worker processes playing rollout deals (`learn/parallel.py`); 0 = play them in the main
+    process. Fixed opponents must then be ones a worker can rebuild by name (not `clone`)."""
     signaling_deals: int = 200
     """Greedy self-play deals for the signaling probe at every evaluation
     (`learn/signaling.py`); 0 disables it. Skipped with `bid_agent`, whose auctions are not the
@@ -107,6 +126,15 @@ class TrainConfig:
     eval_n_pairs: int = 150
     checkpoint_dir: Path = Path("checkpoints/m7")
     log_dir: Path = Path("runs/m7")
+
+
+def rollout_seed_for(config: TrainConfig, iteration: int) -> int:
+    """Base seed of an iteration's rollout; shuffle `i` of the iteration uses `base + i`.
+
+    Iterations must use DISJOINT shuffles. Until 2026-11-12 the base was `seed * 1_000_003 +
+    iteration`, so iteration k+1 replayed 255 of iteration k's 256 shuffles and a 400-iteration
+    run saw only ~655 distinct deals instead of ~102,000 (every M7 run before then)."""
+    return config.seed * 1_000_000_007 + iteration * max(1, config.n_deals_per_iter)
 
 
 def _entropy_coef_at(iteration: int, config: TrainConfig) -> float:
@@ -292,27 +320,104 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
         raise ValueError(f"unknown bid_agent {config.bid_agent!r}; expected None or 'heuristic'")
     bid_agent = heuristic_agent if config.bid_agent == "heuristic" else None
 
+    parallel: ParallelRollout | None = None
+    if config.n_workers > 0:
+        hidden = tuple(m.out_features for m in net.trunk if isinstance(m, torch.nn.Linear))
+        parallel = ParallelRollout(
+            rules,
+            config.n_workers,
+            hidden=hidden,
+            fixed_opponents=config.baseline_opponents,
+            bid_agent=config.bid_agent,
+            seed=config.seed,
+        )
+    try:
+        _train_loop(
+            config,
+            rules,
+            space,
+            net,
+            critic,
+            optimizer,
+            warmup_optimizer,
+            pool,
+            writer,
+            eval_rng,
+            random_agent,
+            heuristic_agent,
+            passer_agent,
+            baseline_opponents,
+            bid_agent,
+            parallel,
+        )
+    finally:
+        if parallel is not None:
+            parallel.close()
+    save_checkpoint(
+        config.checkpoint_dir / "final.pt",
+        net,
+        rules,
+        extra={"iteration": config.n_iterations},
+        critic=critic,
+    )
+    writer.close()
+
+
+def _train_loop(
+    config: TrainConfig,
+    rules: RuleConfig,
+    space: ActionSpace,
+    net: PolicyValueNet,
+    critic: CentralCritic | None,
+    optimizer: torch.optim.Optimizer,
+    warmup_optimizer: torch.optim.Optimizer,
+    pool: OpponentPool,
+    writer: SummaryWriter,
+    eval_rng: random.Random,
+    random_agent: Agent,
+    heuristic_agent: Agent,
+    passer_agent: Agent,
+    baseline_opponents: list[Opponent],
+    bid_agent: Agent | None,
+    parallel: ParallelRollout | None,
+) -> None:
     best_score = float("-inf")
     for iteration in range(config.n_iterations):
         forced_bid_prob = _forced_bid_prob_at(iteration, config)
         forced_contra_prob = _forced_contra_prob_at(iteration, config)
         t0 = time.perf_counter()
-        transitions, stats = collect_rollout(
-            rules,
-            space,
-            net,
-            n_deals=config.n_deals_per_iter,
-            seed=config.seed * 1_000_003 + iteration,
-            opponent_pool=[*baseline_opponents, *pool.snapshots],
-            opponent_prob=config.opponent_prob,
-            gamma=config.gamma,
-            lam=config.lam,
-            forced_bid_prob=forced_bid_prob,
-            bid_agent=bid_agent,
-            critic=critic,
-            forced_contra_prob=forced_contra_prob,
-            reward_scale=config.reward_scale,
-        )
+        rollout_seed = rollout_seed_for(config, iteration)
+        if parallel is not None:
+            transitions, stats = parallel.collect(
+                net,
+                pool.versioned(),
+                n_deals=config.n_deals_per_iter,
+                seed=rollout_seed,
+                opponent_prob=config.opponent_prob,
+                gamma=config.gamma,
+                lam=config.lam,
+                forced_bid_prob=forced_bid_prob,
+                critic=critic,
+                forced_contra_prob=forced_contra_prob,
+                reward_scale=config.reward_scale,
+            )
+        else:
+            transitions, stats = collect_rollout(
+                rules,
+                space,
+                net,
+                n_deals=config.n_deals_per_iter,
+                seed=rollout_seed,
+                opponent_pool=[*baseline_opponents, *pool.snapshots],
+                opponent_prob=config.opponent_prob,
+                gamma=config.gamma,
+                lam=config.lam,
+                forced_bid_prob=forced_bid_prob,
+                bid_agent=bid_agent,
+                critic=critic,
+                forced_contra_prob=forced_contra_prob,
+                reward_scale=config.reward_scale,
+            )
         t_rollout = time.perf_counter() - t0
 
         entropy_coef = _entropy_coef_at(iteration, config)
@@ -457,6 +562,37 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                     writer.add_scalar(
                         "signaling/card_change_rate", signaling.card_change_rate.mean, iteration
                     )
+            if bid_agent is None and config.support_deals > 0:
+                support = measure_partner_support(
+                    rules, space, net, n_deals=config.support_deals, seed=config.seed + 9
+                )
+                print(f"  [partner support] {support.summary()}")
+                if support.support_gap is not None:
+                    writer.add_scalar("signaling/support_gap", support.support_gap, iteration)
+            if bid_agent is None and config.play_eval_pairs > 0:
+                play_seeds = seeds[: config.play_eval_pairs]
+                play_dealers = dealers[: config.play_eval_pairs]
+                learned_play = ComposedAgent(heuristic_agent, NNAgent(net, sample=False))
+                yardsticks: list[tuple[str, Agent]] = [
+                    ("play_vs_random", ComposedAgent(heuristic_agent, random_agent)),
+                    ("play_vs_heuristic", heuristic_agent),
+                ]
+                if config.pimc_eval:
+                    pimc = PIMCAgent(
+                        rules, k=10, solve_threshold=4, rng=random.Random(config.seed + 11)
+                    )
+                    yardsticks.append(("play_vs_pimc", ComposedAgent(heuristic_agent, pimc)))
+                for tag, reference in yardsticks:
+                    report = evaluate_pairs(
+                        rules,
+                        space,
+                        play_seeds,
+                        play_dealers,
+                        learned_play,
+                        reference,
+                        n_resamples=2000,
+                    )
+                    _log_eval(writer, tag, report, iteration)
             _log_eval(writer, "vs_random", report_vs_random, iteration)
             _log_eval(writer, "vs_heuristic", report_vs_heuristic, iteration)
             if config.heldout_offsets:
@@ -500,12 +636,3 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                 extra={"iteration": iteration + 1},
                 critic=critic,
             )
-
-    save_checkpoint(
-        config.checkpoint_dir / "final.pt",
-        net,
-        rules,
-        extra={"iteration": config.n_iterations},
-        critic=critic,
-    )
-    writer.close()

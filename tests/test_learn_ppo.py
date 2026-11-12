@@ -5,6 +5,7 @@ per-transition log-prob recomputation isn't silently detached from the graph."""
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -230,3 +231,47 @@ def test_outcome_coef_trains_the_outcome_head() -> None:
     assert losses[-1] < losses[0] * 0.7
     off = ppo_update(net, SPACE, transitions, optimizer, PPOConfig(epochs=1, minibatch_size=64))
     assert off.outcome_loss == 0.0
+
+
+def test_vectorised_scoring_matches_per_sample_recompute() -> None:
+    """`score_batch` (the vectorised scoring `ppo_update` uses) must reproduce the per-sample
+    hierarchical `_recompute_log_prob_from_output` on every kind of decision: card plays, passes,
+    doubles and factored bids."""
+    from bazarblot.agents.nn.network import apply_action_prior
+    from bazarblot.agents.nn.ppo_agent import _recompute_log_prob_from_output
+    from bazarblot.learn.ppo import prepare_batch, score_batch
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    apply_action_prior(net, raise_decay=0.5, capot_bias=-4.0, double_bias=-1.0)
+    net.eval()
+    transitions, _ = collect_rollout(RULES, SPACE, net, n_deals=40, seed=3)
+    kinds = {
+        "play": sum(t.decision.phase.name == "PLAY" for t in transitions),
+        "pass": sum(t.decision.action_idx == 0 for t in transitions),
+        "double": sum(t.decision.action_idx in (1, 2) for t in transitions),
+        "bid": sum(
+            t.decision.phase.name == "AUCTION" and t.decision.action_idx > 2 for t in transitions
+        ),
+    }
+    assert all(v > 0 for v in kinds.values()), kinds
+
+    prepared = prepare_batch(SPACE, transitions)
+    idx = torch.arange(len(transitions))
+    obs = torch.from_numpy(np.stack([t.decision.obs for t in transitions]))
+    with torch.no_grad():
+        out = net(obs)
+        log_probs, entropies = score_batch(out, prepared, idx)
+    for j, t in enumerate(transitions):
+        out_j = {k: v[j] for k, v in out.items()}
+        lp, ent, _ = _recompute_log_prob_from_output(
+            SPACE,
+            out_j,
+            t.decision.mask,
+            t.decision.phase,
+            t.decision.base_level,
+            t.decision.action_idx,
+        )
+        assert log_probs[j].item() == pytest.approx(lp.item(), abs=1e-4)
+        assert entropies[j].item() == pytest.approx(ent.item(), abs=1e-4)
+        assert log_probs[j].item() == pytest.approx(t.decision.log_prob, abs=1e-4)

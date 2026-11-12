@@ -56,3 +56,17 @@ def test_measure_signaling_report_is_well_formed() -> None:
     assert 0.0 <= c.lo <= c.mean <= c.hi <= 1.0
     assert 0.0 <= report.partner_declared_share <= 1.0
     assert net.training  # restored
+
+
+def test_partner_support_report_is_consistent() -> None:
+    from bazarblot.learn.signaling import measure_partner_support
+
+    torch.manual_seed(0)
+    net = build_network(RULES)
+    apply_action_prior(net, raise_decay=0.5, capot_bias=-4.0, double_bias=-3.0)
+    report = measure_partner_support(RULES, SPACE, net, n_deals=80, seed=2)
+    assert report.n_decisions == sum(v[0] for v in report.by_aces.values())
+    for n, p_pass, p_sup, p_own in report.by_aces.values():
+        assert n > 0 and abs(p_pass + p_sup + p_own - 1.0) < 1e-9
+    assert all(size >= 1 for size in report.support_raise_sizes)
+    assert isinstance(report.summary(), str)

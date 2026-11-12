@@ -23,10 +23,19 @@ import numpy.typing as npt
 import torch
 from torch import optim
 
-from bazarblot.agents.nn.network import CentralCritic, PolicyValueNet
-from bazarblot.agents.nn.ppo_agent import _recompute_log_prob_from_output
+from bazarblot.agents.nn.bid_factor import bid_legality, n_delta_slots
+from bazarblot.agents.nn.network import (
+    META_BID,
+    META_CONTRA,
+    META_PASS,
+    META_RECONTRA,
+    N_META,
+    CentralCritic,
+    PolicyValueNet,
+)
+from bazarblot.core.auction import BidAction
 from bazarblot.core.deal import Phase
-from bazarblot.env.actions import ActionSpace
+from bazarblot.env.actions import PASS_IDX, ActionSpace
 from bazarblot.learn.belief import IGNORE, belief_accuracy, belief_loss, privileged_features
 from bazarblot.learn.rollout import Transition
 
@@ -96,6 +105,127 @@ def _advantages(transitions: list[Transition], per_phase: bool) -> npt.NDArray[n
     return out
 
 
+_NEG = -1e9  # same fill as `agents/nn/ppo_agent._masked_categorical`
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedBatch:
+    """Per-transition masks and targets for scoring a whole minibatch with tensor operations,
+    computed ONCE per `ppo_update` call (the legality bookkeeping is pure Python and used to run
+    for every transition in every minibatch of every epoch). Rows a head does not apply to (e.g.
+    the card head on an auction decision) get a dummy one-legal-slot mask and target 0, so every
+    head's log-softmax is finite; their contribution is then zeroed by `is_play` / `is_bid`.
+
+    The scoring reproduces `agents/nn/ppo_agent._recompute_log_prob_from_output` exactly (a test
+    checks it): log-prob and entropy of a bid are the sums over meta, Delta, type and capot."""
+
+    is_play: torch.Tensor  # (N,) bool
+    is_bid: torch.Tensor  # (N,) bool, auction decisions that chose BID
+    card_mask: torch.Tensor  # (N, n_cards) bool
+    card_target: torch.Tensor  # (N,) long
+    meta_mask: torch.Tensor  # (N, 4) bool
+    meta_target: torch.Tensor
+    delta_mask: torch.Tensor  # (N, n_delta) bool
+    delta_target: torch.Tensor
+    type_mask: torch.Tensor  # (N, n_types) bool
+    type_target: torch.Tensor
+    capot_mask: torch.Tensor  # (N, capot_states) bool
+    capot_target: torch.Tensor
+
+
+def prepare_batch(space: ActionSpace, transitions: list[Transition]) -> PreparedBatch:
+    n = len(transitions)
+    n_cards = space.action_dim - space.play_start
+    n_delta = n_delta_slots(space)
+    n_types = len(space.contract_types)
+    n_capot = space.capot_states
+    is_play = np.zeros(n, dtype=bool)
+    is_bid = np.zeros(n, dtype=bool)
+    card_mask = np.zeros((n, n_cards), dtype=bool)
+    card_target = np.zeros(n, dtype=np.int64)
+    meta_mask = np.zeros((n, N_META), dtype=bool)
+    meta_target = np.zeros(n, dtype=np.int64)
+    delta_mask = np.zeros((n, n_delta), dtype=bool)
+    delta_target = np.zeros(n, dtype=np.int64)
+    type_mask = np.zeros((n, n_types), dtype=bool)
+    type_target = np.zeros(n, dtype=np.int64)
+    capot_mask = np.zeros((n, n_capot), dtype=bool)
+    capot_target = np.zeros(n, dtype=np.int64)
+    for i, t in enumerate(transitions):
+        d = t.decision
+        if d.phase == Phase.PLAY:
+            is_play[i] = True
+            card_mask[i] = d.mask[space.play_start : space.action_dim]
+            card_target[i] = d.action_idx - space.play_start
+            meta_mask[i, 0] = delta_mask[i, 0] = type_mask[i, 0] = capot_mask[i, 0] = True
+            continue
+        card_mask[i, 0] = True
+        legality = bid_legality(d.mask, space, d.base_level)
+        meta_mask[i, META_PASS] = bool(d.mask[PASS_IDX])
+        meta_mask[i, META_CONTRA] = bool(d.mask[1])
+        meta_mask[i, META_RECONTRA] = bool(d.mask[2])
+        meta_mask[i, META_BID] = legality.any_bid_legal()
+        if d.action_idx in (PASS_IDX, 1, 2):
+            meta_target[i] = {PASS_IDX: META_PASS, 1: META_CONTRA, 2: META_RECONTRA}[d.action_idx]
+            delta_mask[i, 0] = type_mask[i, 0] = capot_mask[i, 0] = True
+            continue
+        action = space.decode(d.action_idx)
+        assert isinstance(action, BidAction)
+        is_bid[i] = True
+        meta_target[i] = META_BID
+        delta = action.level - d.base_level
+        type_idx = space.contract_types.index(action.contract_type)
+        delta_mask[i] = legality.delta_mask
+        delta_target[i] = delta - 1
+        type_mask[i] = legality.type_mask_given_delta[delta - 1]
+        type_target[i] = type_idx
+        capot_mask[i] = legality.capot_mask_given_delta_type[delta - 1, type_idx]
+        capot_target[i] = int(action.capot) if n_capot == 2 else 0
+    return PreparedBatch(
+        is_play=torch.from_numpy(is_play),
+        is_bid=torch.from_numpy(is_bid),
+        card_mask=torch.from_numpy(card_mask),
+        card_target=torch.from_numpy(card_target),
+        meta_mask=torch.from_numpy(meta_mask),
+        meta_target=torch.from_numpy(meta_target),
+        delta_mask=torch.from_numpy(delta_mask),
+        delta_target=torch.from_numpy(delta_target),
+        type_mask=torch.from_numpy(type_mask),
+        type_target=torch.from_numpy(type_target),
+        capot_mask=torch.from_numpy(capot_mask),
+        capot_target=torch.from_numpy(capot_target),
+    )
+
+
+def _head(
+    logits: torch.Tensor, mask: torch.Tensor, target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Masked log-prob of `target` and entropy, per row."""
+    log_p = torch.log_softmax(logits.masked_fill(~mask, _NEG), dim=-1)
+    lp = log_p.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    entropy = -(log_p.exp() * log_p).sum(-1)
+    return lp, entropy
+
+
+def score_batch(
+    out: dict[str, torch.Tensor], prepared: PreparedBatch, idx: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Log-prob and entropy of the recorded actions for rows `idx`, given the network output
+    `out` for exactly those rows (in the same order)."""
+    p = prepared
+    n_delta = p.delta_mask.shape[1]
+    card_lp, card_ent = _head(out["card"], p.card_mask[idx], p.card_target[idx])
+    meta_lp, meta_ent = _head(out["meta"], p.meta_mask[idx], p.meta_target[idx])
+    delta_lp, delta_ent = _head(out["delta"][:, :n_delta], p.delta_mask[idx], p.delta_target[idx])
+    type_lp, type_ent = _head(out["type"], p.type_mask[idx], p.type_target[idx])
+    capot_lp, capot_ent = _head(out["capot"], p.capot_mask[idx], p.capot_target[idx])
+    bid = p.is_bid[idx].float()
+    auction_lp = meta_lp + bid * (delta_lp + type_lp + capot_lp)
+    auction_ent = meta_ent + bid * (delta_ent + type_ent + capot_ent)
+    play = p.is_play[idx]
+    return torch.where(play, card_lp, auction_lp), torch.where(play, card_ent, auction_ent)
+
+
 def ppo_update(
     net: PolicyValueNet,
     space: ActionSpace,
@@ -126,6 +256,26 @@ def ppo_update(
     old_log_probs = np.array([t.decision.log_prob for t in transitions], dtype=np.float32)
 
     n = len(transitions)
+    prepared = prepare_batch(space, transitions)
+    all_obs = torch.from_numpy(np.stack([t.decision.obs for t in transitions]))
+    n_cards = space.action_dim - space.play_start
+    all_belief = torch.from_numpy(
+        np.stack(
+            [
+                t.belief_target
+                if t.belief_target is not None
+                else np.full(n_cards, IGNORE, dtype=np.int8)
+                for t in transitions
+            ]
+        ).astype(np.int64)
+    )
+    all_privileged = (
+        torch.from_numpy(privileged_features(np.stack([_require_target(t) for t in transitions])))
+        if critic is not None
+        else None
+    )
+    all_natural = torch.from_numpy(np.array([not t.decision.forced for t in transitions]))
+    all_outcome = torch.tensor([t.outcome_target for t in transitions], dtype=torch.int64)
     stats_accum = {
         "policy_loss": 0.0,
         "value_loss": 0.0,
@@ -146,35 +296,16 @@ def ppo_update(
         order = np.random.permutation(n)
         for start in range(0, n, config.minibatch_size):
             idx = order[start : start + config.minibatch_size]
-            obs_batch = torch.from_numpy(np.stack([transitions[i].decision.obs for i in idx]))
+            idx_t = torch.from_numpy(idx)
+            obs_batch = all_obs[idx_t]
             out_batch = net(obs_batch)
-
-            batch_log_probs = []
-            batch_entropies = []
-            batch_values = []
-            for j, i in enumerate(idx):
-                t = transitions[i]
-                out_i = {k: v[j] for k, v in out_batch.items()}
-                log_prob, entropy, value = _recompute_log_prob_from_output(
-                    space,
-                    out_i,
-                    t.decision.mask,
-                    t.decision.phase,
-                    t.decision.base_level,
-                    t.decision.action_idx,
-                )
-                batch_log_probs.append(log_prob)
-                batch_entropies.append(entropy)
-                batch_values.append(value)
-
-            new_log_probs = torch.stack(batch_log_probs)
-            entropies = torch.stack(batch_entropies)
-            values = torch.stack(batch_values)
+            new_log_probs, entropies = score_batch(out_batch, prepared, idx_t)
+            values = out_batch["value"]
             if critic is not None:
                 # The baseline comes from the centralized critic (it sees the hidden hands); the
                 # actor's own value head is then unused. Gradients reach only the critic here.
-                targets_np = np.stack([_require_target(transitions[i]) for i in idx])
-                values = critic(obs_batch, torch.from_numpy(privileged_features(targets_np)))
+                assert all_privileged is not None
+                values = critic(obs_batch, all_privileged[idx_t])
 
             batch_advantages = torch.from_numpy(advantages[idx])
             batch_returns = torch.from_numpy(returns[idx])
@@ -185,9 +316,7 @@ def ppo_update(
                 # exploratory action can be extremely unlikely under the policy (a double it
                 # gives probability 1e-4), so a few nats of change on a handful of them would
                 # swamp the mean and stop the update for no real reason.
-                natural = torch.from_numpy(
-                    np.array([not transitions[i].decision.forced for i in idx], dtype=bool)
-                )
+                natural = all_natural[idx_t]
                 log_ratio = batch_old_log_probs - new_log_probs
                 approx_kl = (log_ratio[natural] if bool(natural.any()) else log_ratio).mean().item()
             if config.target_kl is not None and approx_kl > config.target_kl:
@@ -210,23 +339,14 @@ def ppo_update(
             batch_belief_loss = torch.zeros(())
             batch_belief_acc = 0.0
             if config.belief_coef > 0.0:
-                targets = torch.from_numpy(
-                    np.stack(
-                        [
-                            transitions[i].belief_target
-                            if transitions[i].belief_target is not None
-                            else np.full(out_batch["belief"].shape[1], IGNORE, dtype=np.int8)
-                            for i in idx
-                        ]
-                    ).astype(np.int64)
-                )
+                targets = all_belief[idx_t]
                 batch_belief_loss = belief_loss(out_batch["belief"], targets)
                 batch_belief_acc = belief_accuracy(out_batch["belief"], targets)
 
             batch_outcome_loss = torch.zeros(())
             batch_outcome_acc = 0.0
             if config.outcome_coef > 0.0:
-                labels = torch.tensor([transitions[i].outcome_target for i in idx])
+                labels = all_outcome[idx_t]
                 labelled = labels >= 0
                 if bool(labelled.any()):
                     logits = out_batch["outcome"][labelled]
