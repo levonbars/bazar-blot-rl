@@ -33,6 +33,7 @@ from bazarblot.learn.checkpoint import critic_from_payload, load_checkpoint, sav
 from bazarblot.learn.opponent_pool import OpponentPool
 from bazarblot.learn.ppo import PPOConfig, ppo_update
 from bazarblot.learn.rollout import Opponent, collect_rollout
+from bazarblot.learn.signaling import measure_signaling
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,10 @@ class TrainConfig:
     and logs the profile. Keep them DISJOINT from the offsets used in `baseline_opponents`, or the
     profile measures training opponents instead of generalisation."""
     heldout_pairs: int = 100
+    signaling_deals: int = 200
+    """Greedy self-play deals for the signaling probe at every evaluation
+    (`learn/signaling.py`); 0 disables it. Skipped with `bid_agent`, whose auctions are not the
+    learner's."""
     opponent_prob: float = 0.3
     pool_max_size: int = 8
     snapshot_every: int = 20
@@ -440,6 +445,18 @@ def train(config: TrainConfig, rules: RuleConfig | None = None) -> None:
                 writer.add_scalar("behavior/made_rate", behavior.made_rate, iteration)
             if behavior.contra_rate is not None:
                 writer.add_scalar("behavior/contra_rate", behavior.contra_rate, iteration)
+            if bid_agent is None and config.signaling_deals > 0:
+                signaling = measure_signaling(
+                    rules, space, net, n_deals=config.signaling_deals, seed=config.seed + 7
+                )
+                if signaling is not None:
+                    print(f"  [signaling] {signaling.summary()}")
+                    writer.add_scalar(
+                        "signaling/partner_info_gain", signaling.partner_info_gain.mean, iteration
+                    )
+                    writer.add_scalar(
+                        "signaling/card_change_rate", signaling.card_change_rate.mean, iteration
+                    )
             _log_eval(writer, "vs_random", report_vs_random, iteration)
             _log_eval(writer, "vs_heuristic", report_vs_heuristic, iteration)
             if config.heldout_offsets:

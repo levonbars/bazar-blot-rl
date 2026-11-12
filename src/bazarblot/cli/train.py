@@ -65,6 +65,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         "(keep disjoint from the offsets in --opponents)",
     )
     p.add_argument("--heldout-pairs", type=int, default=100)
+    p.add_argument("--signaling-deals", type=int, default=200)
     p.add_argument("--opponent-prob", type=float, default=0.3)
     p.add_argument("--snapshot-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=20)
@@ -96,6 +97,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         baseline_opponents=tuple(x for x in args.opponents.split(",") if x),
         heldout_offsets=tuple(int(x) for x in args.heldout_offsets.split(",") if x),
         heldout_pairs=args.heldout_pairs,
+        signaling_deals=args.signaling_deals,
         opponent_prob=args.opponent_prob,
         snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,

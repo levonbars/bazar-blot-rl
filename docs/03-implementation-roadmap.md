@@ -1267,6 +1267,69 @@ Natural next steps: more deals (parallel rollouts), the signaling measurement as
 code with confidence intervals, and finding why doubling dies (a fixed exploration floor for
 doubling, or a larger reward scale, as step 3d(b) suggested).
 
+**Where the from-scratch agent's gap is: card play, not bidding** (`python -m
+bazarblot.cli.ablation`, swaps one phase at a time for the heuristic's; 400 fresh pairs; scratch1
+final / scratch2 final):
+
+| comparison | scratch1 | scratch2 |
+|---|---|---|
+| full agent vs heuristic | -0.3 (-1.5, +1.1) | 0.0 (-1.4, +1.4) |
+| learned bidding + heuristic play vs heuristic | +1.2 (-0.1, +2.6) | +0.3 (-1.0, +1.6) |
+| heuristic bidding + learned play vs heuristic (same auctions) | -1.6 (-2.5, -0.8) | -1.3 (-2.0, -0.5) |
+| learned play vs heuristic play, both under the agent's own auctions | -3.8 (-4.9, -2.7) | -2.6 (-4.0, -1.3) |
+
+The learned bidding is at least heuristic-level; the learned card play is worse, and worse still
+under the agent's own auctions, which are exactly where reading partner's bids could help (the
+heuristic ignores the auction beyond the contract and still out-plays it there).
+
+**The signaling probe is now code** (`learn/signaling.py`, `python -m bazarblot.cli.signaling`, and
+logged at every training evaluation as `[signaling]`), with CIs bootstrapped over deals. On the
+same 400 deals: untrained control -0.0003 nats/card, card change 3.1% (CI 0.0-6.2%, 24 deals reach
+play); scratch1 iteration 150 +0.024 (+0.020, +0.027), 5.7%; scratch1 final +0.045 (+0.040,
++0.051), 3.3% (2.4-4.2%); scratch2 final +0.024 (+0.019, +0.029), 3.6% (2.7-4.5%). Partner's bids
+carry real information beyond the final contract; the play does not use it.
+
+**Reward scale 96 instead of 24 (`m7_scratch2`, otherwise identical to scratch1): doubling
+survives and the agent is better across the board.** Why the scale matters, worked for a typical
+level-12 trump contract (made: attackers ~+16 margin, ~+28 doubled; failed: defenders ~+28, ~+40
+doubled): at scale 24, doubling changes the defenders' reward by -0.245 if the contract is made and
++0.108 if it fails, so it pays only above ~69% confidence of a failure, against 50% in real points;
+at scale 96 the break-even is ~52%. Results:
+
+- *Pass slide:* same shape, a little deeper (peak 86% passed out at iteration 16, vs 75%), recovered
+  by iteration ~50.
+- *Doubling:* in self-play 14% of contracts doubled at iteration 25, peaking at ~33% (iteration 100),
+  then settling to 6-9% (iteration 250 on); the greedy policy doubles in 2-15% of its chances
+  across evaluations and 6% at the end (scratch1: 0% throughout). First time doubling has been
+  learned without a hand-written rule or forced exploration.
+- *In-run margins* reach the same place by iteration 250 (vs heuristic +0.1, vs always-pass +6.1)
+  after trailing scratch1 slightly between 100 and 225; final vs heuristic -0.5 (-2.9, +2.0), vs
+  always-pass +6.1 (+3.8, +8.3).
+- *Held-out profile* (same seeds as scratch1, 300 pairs), scratch2 vs scratch1: -6 +5.5 (+2.4),
+  -3 +4.4 (+2.1), -1 +2.3 (+0.6), 0 +1.0 (-0.3), +2 -2.3 (-3.0), +4 +0.8 (-2.6), +8 +23.4 (+21.0),
+  +12 +40.8 (+31.4). Better at every offset; the gains against the reckless styles (+12: +9.4) are
+  where doubling pays. Still below the heuristic-bootstrapped 3b agent against normal bidders.
+- *Signaling:* no better than scratch1 (above).
+
+Scale 96 is the setting for runs from here; it breaks loss-curve comparability with earlier runs
+(spec §6), which is accepted deliberately.
+
+**Partnership bidding is not being learned** (raised by the project owner: an opening bid shows
+aces or a long suit, and partner should first answer with aces, +1 or +2, before bidding their own
+suit). Measured on 600 greedy self-play deals, decisions where partner holds the standing bid
+(scratch1 / scratch2 final): pass 64% / 73%, support partner's suit 11% / 11%, bid another suit
+25% / 17%. Support rises only slightly with aces (0 aces 10% / 7%, 2 aces 14% / 17%), with 3 aces
+the agent bids its own suit 40-50% of the time, and every support raise is +1 (0 of ~250 are +2).
+The agents bid as four individuals. Likely reasons: emergent communication needs a sender and a
+listener at once and neither exists at the start; the only reward is the noisy final margin, and
+the play does not yet use partner's bids, so a support bid's benefit (a better contract) is buried
+in deal and play variance while its cost (a higher contract) is immediate; the starting raise bias
+makes +1 the default; and ~100k deals is small. Proposed next: credit auction decisions with the
+centralized critic's estimate of the contract they lead to (the critic sees all four hands, during
+training only) instead of mostly the played-out result, i.e. a small GAE lambda for auction
+decisions; this is how bridge-bidding work makes partnership bidding learnable (score the contract
+from all hands), with no teacher.
+
 Full project suite passes (`pytest`, 387 tests); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs
