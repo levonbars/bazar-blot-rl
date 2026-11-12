@@ -20,12 +20,13 @@
   <div class="lobby-card">
     <h2>Watch</h2>
     <p>Four bots play each other. Full state visible — the debug view.</p>
+    <label>Bots <select id="watchBot" class="bot-select"></select></label>
     <label>Match seed (optional) <input id="watchSeed" type="number" placeholder="random" /></label>
     <button id="startWatch">Start watching</button>
   </div>
   <div class="lobby-card">
     <h2>Play</h2>
-    <p>You take one seat against three bots. You only see what your seat would see.</p>
+    <p>You take one seat; bots play your partner and both opponents. You only see what your seat would see.</p>
     <label>Your seat
       <select id="playSeat">
         <option value="0">Seat 0 (South)</option>
@@ -34,6 +35,7 @@
         <option value="3">Seat 3 (East)</option>
       </select>
     </label>
+    <label>Bots <select id="playBot" class="bot-select"></select></label>
     <label>Match seed (optional) <input id="playSeed" type="number" placeholder="random" /></label>
     <button id="startPlay">Start playing</button>
   </div>

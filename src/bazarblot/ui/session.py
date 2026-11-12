@@ -15,7 +15,11 @@ from bazarblot.core.deal import Action, Deal, Phase
 from bazarblot.core.dealing import deal_hands
 from bazarblot.core.match import Match
 from bazarblot.core.rules import RuleConfig, load_default
+from bazarblot.env.actions import ActionSpace, build_action_space, legal_mask
+from bazarblot.env.infoset import info_set
+from bazarblot.env.tracked_deal import TrackedDeal
 from bazarblot.ui.bots import bot_action
+from bazarblot.ui.opponents import build_bot
 
 Mode = Literal["watch", "play"]
 
@@ -26,6 +30,10 @@ class SessionError(ValueError):
 
 class NotYourTurnError(SessionError):
     pass
+
+
+class BadBotError(SessionError):
+    """The requested bot does not exist or its checkpoint cannot be loaded by this code."""
 
 
 @dataclass
@@ -80,6 +88,7 @@ class GameSession:
         mode: Mode,
         human_seat: int | None,
         match_seed: int,
+        bot_kind: str = "simple",
     ) -> None:
         if mode == "play" and human_seat is None:
             raise SessionError("play mode requires a human_seat")
@@ -89,9 +98,18 @@ class GameSession:
         self.human_seat = human_seat
         self.match_seed = match_seed
         self.bot_rng = random.Random(match_seed ^ 0x5BAD5EED)
+        self.bot_kind = bot_kind
+        try:
+            self.bot_agent = build_bot(bot_kind, rules, match_seed)
+        except ValueError as exc:
+            raise BadBotError(str(exc)) from exc
+        self.space: ActionSpace | None = (
+            build_action_space(rules) if self.bot_agent is not None else None
+        )
         self.match = Match(rules=rules, dealer=0)
         self.events: list[str] = []
         self.deal: Deal
+        self.tracked: TrackedDeal
         self.deal_seed: int
         self.bid_log: list[BidLogEntry] = []
         self.action_log: list[dict[str, Any]] = []
@@ -112,6 +130,7 @@ class GameSession:
         self.deal_seed = self._deal_seed(deal_number, self._redeal_attempt)
         hands = deal_hands(random.Random(self.deal_seed), self.rules)
         self.deal = Deal(self.rules, dealer=self.match.dealer, hands=hands, deal_id=deal_number)
+        self.tracked = TrackedDeal(self.deal)  # keeps the auction history the agents observe
         self.bid_log = []
         self.action_log = []
         self.events.append(f"Deal {deal_number}: dealer is seat {self.match.dealer}")
@@ -138,7 +157,23 @@ class GameSession:
         if not self.is_bot_turn():
             raise SessionError("it is not a bot's turn")
         seat = self.deal.to_act
-        action = bot_action(self.deal, seat, self.bot_rng)
+        if (
+            self.deal.phase == Phase.AUCTION
+            and len(self.tracked.auction_log) >= self.rules.auction.max_auction_steps - 8
+        ):
+            # An auction this long only happens if seats keep raising by one; the engine stops it
+            # at the cap with an error. Bots pass from a few steps before the cap, leaving room
+            # for the passes that close the auction, so the deal can finish.
+            action: Action = PassAction()
+        elif self.bot_agent is None:
+            action = bot_action(self.deal, seat, self.bot_rng)
+        else:
+            assert self.space is not None
+            # Same view as in training: the trained agents only ever saw a 0-0 score and deal 0,
+            # so the real match context is withheld to keep their inputs in familiar territory.
+            info = info_set(self.tracked, seat, match_score=(0, 0), deal_number=0)
+            idx = self.bot_agent.act(info, self.space, legal_mask(info, self.space))
+            action = self.space.decode(idx)
         self._apply(seat, action)
 
     def apply_human_action(self, seat: int, action: Action) -> None:
@@ -154,7 +189,7 @@ class GameSession:
             self.bid_log.append(entry)
         self.action_log.append(_serialize_action(action))
 
-        self.deal.step(action)
+        self.tracked.step(action)
         self.deal.check_invariants()
 
         if self.deal.phase == Phase.ABORTED:
@@ -254,10 +289,16 @@ class SessionStore:
         self._games: dict[str, GameSession] = {}
         self._replays: dict[str, ReplaySession] = {}
 
-    def new_game(self, mode: Mode, human_seat: int | None, match_seed: int | None) -> GameSession:
+    def new_game(
+        self,
+        mode: Mode,
+        human_seat: int | None,
+        match_seed: int | None,
+        bot_kind: str = "simple",
+    ) -> GameSession:
         session_id = uuid.uuid4().hex
         seed = match_seed if match_seed is not None else random.SystemRandom().randrange(2**31)
-        session = GameSession(session_id, load_default(), mode, human_seat, seed)
+        session = GameSession(session_id, load_default(), mode, human_seat, seed, bot_kind)
         with self._lock:
             self._games[session_id] = session
         return session

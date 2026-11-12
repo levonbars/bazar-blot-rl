@@ -37,9 +37,25 @@ async function api(method, path, body) {
 
 // ---------------------------------------------------------------- lobby
 
+(async function loadBots() {
+  try {
+    const data = await api("GET", "/api/bots");
+    for (const sel of document.querySelectorAll(".bot-select")) {
+      for (const b of data.bots) {
+        const opt = document.createElement("option");
+        opt.value = b.id;
+        opt.textContent = b.label;
+        sel.appendChild(opt);
+      }
+    }
+  } catch (e) {
+    console.error("could not load bot list", e);
+  }
+})();
+
 document.getElementById("startWatch").addEventListener("click", async () => {
   const seedInput = document.getElementById("watchSeed").value;
-  const body = { mode: "watch" };
+  const body = { mode: "watch", bot: document.getElementById("watchBot").value || null };
   if (seedInput) body.match_seed = parseInt(seedInput, 10);
   try {
     const data = await api("POST", "/api/game", body);
@@ -52,7 +68,7 @@ document.getElementById("startWatch").addEventListener("click", async () => {
 document.getElementById("startPlay").addEventListener("click", async () => {
   const seat = parseInt(document.getElementById("playSeat").value, 10);
   const seedInput = document.getElementById("playSeed").value;
-  const body = { mode: "play", human_seat: seat };
+  const body = { mode: "play", human_seat: seat, bot: document.getElementById("playBot").value || null };
   if (seedInput) body.match_seed = parseInt(seedInput, 10);
   try {
     const data = await api("POST", "/api/game", body);

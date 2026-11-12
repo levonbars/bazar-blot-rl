@@ -21,7 +21,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from bazarblot.core.deal import DealError, DealFinishedError, IllegalActionError, Phase
-from bazarblot.ui.session import STORE, NotYourTurnError, SessionError
+from bazarblot.core.rules import load_default
+from bazarblot.ui.opponents import available_bots, default_bot
+from bazarblot.ui.session import STORE, BadBotError, NotYourTurnError, SessionError
 from bazarblot.ui.views import (
     ActionDecodeError,
     FullStateView,
@@ -45,7 +47,7 @@ def index() -> FileResponse:
 def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, NotYourTurnError):
         return HTTPException(status_code=403, detail=str(exc))
-    if isinstance(exc, (IllegalActionError, ActionDecodeError, DealFinishedError)):
+    if isinstance(exc, (IllegalActionError, ActionDecodeError, DealFinishedError, BadBotError)):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, (SessionError, DealError)):
         return HTTPException(status_code=404, detail=str(exc))
@@ -70,6 +72,7 @@ class NewGameRequest(BaseModel):
     mode: str  # "watch" | "play"
     human_seat: int | None = None
     match_seed: int | None = None
+    bot: str | None = None  # see `ui/opponents.py`; default: the preferred trained checkpoint
 
 
 class ActionRequest(BaseModel):
@@ -88,6 +91,12 @@ class GotoRequest(BaseModel):
 # ---------------------------------------------------------------- watch/play (shared) endpoints
 
 
+@app.get("/api/bots")
+def list_bots() -> dict[str, Any]:
+    options = available_bots(load_default())
+    return {"bots": [{"id": o.id, "label": o.label} for o in options]}
+
+
 @app.post("/api/game")
 def new_game(req: NewGameRequest) -> dict[str, Any]:
     if req.mode not in ("watch", "play"):
@@ -95,7 +104,8 @@ def new_game(req: NewGameRequest) -> dict[str, Any]:
     if req.mode == "play" and req.human_seat is None:
         raise HTTPException(status_code=400, detail="play mode requires human_seat")
     try:
-        session = STORE.new_game(req.mode, req.human_seat, req.match_seed)  # type: ignore[arg-type]
+        bot = req.bot or default_bot(load_default())
+        session = STORE.new_game(req.mode, req.human_seat, req.match_seed, bot)  # type: ignore[arg-type]
         if session.mode == "play":
             # The opener isn't necessarily the human — advance any bot turns that come
             # before the human's first move, same as after every subsequent action.
@@ -130,6 +140,7 @@ def _game_state(session_id: str) -> dict[str, Any]:
         "session_id": session.session_id,
         "mode": session.mode,
         "human_seat": session.human_seat,
+        "bot": session.bot_kind,
         "match_scores": list(match_score),
         "match_target": session.rules.match.target,
         "match_finished": session.match.finished,

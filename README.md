@@ -86,7 +86,10 @@ uvicorn bazarblot.ui.app:app --port 8420   # then open http://localhost:8420
 Three modes: **watch** four bots play each other with full state visible, **play** one seat
 yourself against three bots (only your seat's information is ever sent to the browser), or
 **replay** a logged deal (paste the JSON from "Copy replay log" after a deal finishes) and step
-through it. See [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M1.5 for
+through it. The **Bots** menu picks who fills the other seats (partner included): a trained
+checkpoint (any `checkpoints/*/final.pt` the current code can load, `m7_long_s1` first; set
+`BAZARBLOT_CHECKPOINTS` to another glob to change the list), the heuristic, or the simple bot.
+Trained bots play greedily and see a 0-0 score, as in training. See [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M1.5 for
 the design (why `play` and `watch` are two genuinely separate code paths, not one function with a
 "reveal everything" flag) and the bugs building it caught.
 
