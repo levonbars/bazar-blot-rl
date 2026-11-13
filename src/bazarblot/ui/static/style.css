@@ -809,3 +809,20 @@ textarea { min-height: 120px; font-family: ui-monospace, Menlo, monospace; font-
 .result-combos b { color: var(--gold); }
 .result-combos .red { color: #ff6b6b; }
 .result-combos.none { color: var(--ink-faint); font-size: 13px; }
+
+/* ---------------------------------------------------------------- debug: all hands visible */
+
+.debug-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-dim); margin-top: 10px; cursor: pointer; }
+.debug-check input { accent-color: var(--gold); width: 16px; height: 16px; }
+.hud-center { display: flex; align-items: center; gap: 12px; }
+.debug-badge {
+  font-family: "Inter", sans-serif;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #2a1c02;
+  background: #ff9f43;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+.hand.peek .card { box-shadow: 0 0 0 2px rgba(255, 159, 67, 0.75), 0 4px 10px rgba(0, 0, 0, 0.4); }

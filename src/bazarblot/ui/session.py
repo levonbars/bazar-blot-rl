@@ -99,6 +99,9 @@ class GameSession:
         self.match_seed = match_seed
         self.bot_rng = random.Random(match_seed ^ 0x5BAD5EED)
         self.bot_kind = bot_kind
+        self.reveal_hands = False
+        """Debug option (play mode): also send every seat's hand to the browser, outside the
+        player view. The bots never see more than their own `InfoSet` either way."""
         try:
             self.bot_agent = build_bot(bot_kind, rules, match_seed)
         except ValueError as exc:

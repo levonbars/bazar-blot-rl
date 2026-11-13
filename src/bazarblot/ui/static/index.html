@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/static/style.css?v=8" />
+<link rel="stylesheet" href="/static/style.css?v=9" />
 </head>
 <body>
 
@@ -46,6 +46,7 @@
         <summary>Advanced</summary>
         <label class="field"><span class="field-label">Match seed</span>
           <input id="playSeed" type="number" placeholder="random" /></label>
+        <label class="debug-check"><input type="checkbox" id="revealHands" /> Debug: show all hands</label>
       </details>
       <button id="startPlay" class="btn btn-gold btn-big">Deal me in</button>
     </div>
@@ -89,7 +90,7 @@
         <div class="team team-them"><span class="team-score" id="scoreThem">0</span><span class="team-name" id="teamNameThem">Them</span></div>
       </div>
     </div>
-    <div class="hud-center" id="dealLabel">Deal 1</div>
+    <div class="hud-center"><span id="dealLabel">Deal 1</span><span class="debug-badge hidden" id="debugBadge">Debug · all hands visible</span></div>
     <div class="hud-right">
       <div class="contract-badge hidden" id="contractBadge"></div>
     </div>
@@ -198,6 +199,7 @@
       <h2>Menu</h2>
       <button class="btn btn-gold" id="resumeBtn">Resume</button>
       <button class="btn btn-ghost" id="copyReplayBtn">Copy replay log</button>
+      <button class="btn btn-ghost" id="revealBtn">Show all hands (debug)</button>
       <button class="btn btn-ghost" id="toggleSideBtn">Hide side panel</button>
       <button class="btn btn-ghost" id="quitBtn">Quit to title</button>
       <div class="menu-meta" id="menuMeta"></div>
@@ -207,6 +209,6 @@
   <div class="toast hidden" id="toast"></div>
 </section>
 
-<script src="/static/app.js?v=8"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>

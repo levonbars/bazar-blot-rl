@@ -206,3 +206,20 @@ def test_no_new_deal_after_the_match_is_over() -> None:
         assert client.post(f"/api/game/{sid}/next_deal").status_code == 200
     assert data["match_finished"]
     assert client.post(f"/api/game/{sid}/next_deal").status_code == 404
+
+
+def test_debug_reveal_shows_all_hands_outside_the_player_view() -> None:
+    res = client.post(
+        "/api/game",
+        json={"mode": "play", "human_seat": 0, "match_seed": 5, "bot": "simple"},
+    )
+    data = res.json()
+    assert "debug_hands" not in data and data["reveal_hands"] is False
+    sid = data["session_id"]
+    data = client.post(f"/api/game/{sid}/reveal", json={"reveal": True}).json()
+    hands = data["debug_hands"]
+    assert len(hands) == 4 and hands[0] == data["state"]["my_hand"]
+    assert sum(len(h) for h in hands) == sum(data["state"]["hand_sizes"])
+    assert "hands" not in data["state"]  # the player view itself stays seat-scoped
+    data = client.post(f"/api/game/{sid}/reveal", json={"reveal": False}).json()
+    assert "debug_hands" not in data

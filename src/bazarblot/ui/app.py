@@ -73,9 +73,14 @@ class NewGameRequest(BaseModel):
     human_seat: int | None = None
     match_seed: int | None = None
     bot: str | None = None  # see `ui/opponents.py`; default: the preferred trained checkpoint
+    reveal_hands: bool = False  # debug: show every seat's hand in play mode
     autoplay: bool = True
     """Run the bots' turns before replying (play mode). The browser UI sends False and steps the
     bots itself with `bot_step`, so each bot move can be shown one at a time."""
+
+
+class RevealRequest(BaseModel):
+    reveal: bool
 
 
 class ActionRequest(BaseModel):
@@ -110,6 +115,7 @@ def new_game(req: NewGameRequest) -> dict[str, Any]:
     try:
         bot = req.bot or default_bot(load_default())
         session = STORE.new_game(req.mode, req.human_seat, req.match_seed, bot)  # type: ignore[arg-type]
+        session.reveal_hands = req.reveal_hands
         if session.mode == "play" and req.autoplay:
             # The opener isn't necessarily the human — advance any bot turns that come
             # before the human's first move, same as after every subsequent action.
@@ -140,7 +146,7 @@ def _game_state(session_id: str) -> dict[str, Any]:
             session.deal, session.human_seat, match_score, session.rules.match.target
         )
 
-    return {
+    out: dict[str, Any] = {
         "session_id": session.session_id,
         "mode": session.mode,
         "human_seat": session.human_seat,
@@ -153,7 +159,24 @@ def _game_state(session_id: str) -> dict[str, Any]:
         "events": session.events[-30:],
         "is_bot_turn": session.is_bot_turn(),
         "state": _to_jsonable(view),
+        "reveal_hands": session.reveal_hands,
     }
+    if session.mode == "play" and session.reveal_hands:
+        # Debug only, and deliberately OUTSIDE `state`: the player view itself never carries
+        # another seat's cards (see `ui/views.py`).
+        out["debug_hands"] = [sorted(h) for h in session.deal.hands]
+    return out
+
+
+@app.post("/api/game/{session_id}/reveal")
+def set_reveal(session_id: str, req: RevealRequest) -> dict[str, Any]:
+    """Debug: switch showing every seat's hand on or off (play mode)."""
+    try:
+        session = STORE.get_game(session_id)
+    except SessionError as exc:
+        raise _http_error(exc) from exc
+    session.reveal_hands = req.reveal
+    return _game_state(session_id)
 
 
 @app.post("/api/game/{session_id}/action")

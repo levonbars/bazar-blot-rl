@@ -182,7 +182,13 @@ for (const b of document.querySelectorAll("#seatPicker button")) {
 })();
 
 $("startPlay").addEventListener("click", async () => {
-  const body = { mode: "play", human_seat: pickedSeat, bot: $("playBot").value || null, autoplay: false };
+  const body = {
+    mode: "play",
+    human_seat: pickedSeat,
+    bot: $("playBot").value || null,
+    autoplay: false,
+    reveal_hands: $("revealHands").checked,
+  };
   const seed = $("playSeed").value;
   if (seed) body.match_seed = parseInt(seed, 10);
   try {
@@ -261,6 +267,8 @@ function enterReplay(data) {
   $("watchControls").classList.add("hidden");
   $("replayControls").classList.remove("hidden");
   $("menuMeta").textContent = "Replay";
+  $("revealBtn").classList.add("hidden");
+  $("debugBadge").classList.add("hidden");
   renderReplay(data);
 }
 
@@ -276,7 +284,15 @@ function isTerminal(state) {
 }
 
 /** Show a server update, animating a completed trick first if one just finished. */
+/** Debug option: the server sends every seat's hand outside the player view; keep it with the
+ * state so the hand renderer can show the other seats face up. */
+function withDebug(data) {
+  if (data && data.state) data.state.debug_hands = data.debug_hands || null;
+  return data;
+}
+
 async function applyUpdate(data) {
+  withDebug(data);
   const prev = app.latest;
   const gen = app.generation;
   const prevTricks = prev ? prev.state.completed_tricks.length : 0;
@@ -406,6 +422,28 @@ $("quitBtn").addEventListener("click", () => {
   app.latest = null;
   showScreen(false);
 });
+$("revealBtn").addEventListener("click", async () => {
+  if (app.mode !== "play") return;
+  try {
+    const data = await api("POST", `/api/game/${app.sessionId}/reveal`, { reveal: !app.latest.reveal_hands });
+    app.latest.reveal_hands = data.reveal_hands;
+    app.latest.debug_hands = data.debug_hands || null;
+    withDebug(app.latest);
+    renderDebugBadge(app.latest);
+    renderHands(app.latest.state);
+  } catch (e) {
+    toast(e.message);
+  }
+  $("menuOverlay").classList.add("hidden");
+});
+
+function renderDebugBadge(data) {
+  const on = app.mode === "play" && !!data.reveal_hands;
+  $("debugBadge").classList.toggle("hidden", !on);
+  $("revealBtn").classList.toggle("hidden", app.mode !== "play");
+  $("revealBtn").textContent = on ? "Hide other hands" : "Show all hands (debug)";
+}
+
 $("toggleSideBtn").addEventListener("click", () => {
   const g = $("game");
   const narrow = window.matchMedia("(max-width: 1100px)").matches;
@@ -478,7 +516,9 @@ function buildBidPanel(legal) {
 // ================================================================ rendering
 
 function render(data) {
+  withDebug(data);
   app.latest = data;
+  renderDebugBadge(data);
   const state = data.state;
   renderHud(data);
   renderPlates(state);
@@ -547,7 +587,8 @@ function renderHands(state) {
     const p = pos(s);
     const el = $(`hand${p}`);
     el.innerHTML = "";
-    const faceUp = app.mode !== "play" || s === app.humanSeat;
+    const peek = app.mode === "play" && s !== app.humanSeat && !!state.debug_hands;
+    const faceUp = app.mode !== "play" || s === app.humanSeat || peek;
     el.classList.toggle("faces", faceUp && p !== 0);
     const small = p !== 0;
     if (!faceUp) {
@@ -555,7 +596,9 @@ function renderHands(state) {
       for (let i = 0; i < n; i++) el.appendChild(backEl(true));
       continue;
     }
-    const cards = sortHand(app.mode === "play" ? state.my_hand : state.hands[s], state.contract);
+    const own = app.mode === "play" ? (peek ? state.debug_hands[s] : state.my_hand) : state.hands[s];
+    const cards = sortHand(own, state.contract);
+    el.classList.toggle("peek", peek);
     const myTurn = state.to_act === s && state.phase === "PLAY";
     const n = cards.length;
     cards.forEach((cid, i) => {
