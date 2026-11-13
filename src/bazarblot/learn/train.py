@@ -36,11 +36,13 @@ from bazarblot.env.actions import ActionSpace, build_action_space
 from bazarblot.eval.behavior import evaluate_behavior
 from bazarblot.eval.metrics import evaluate_pairs
 from bazarblot.learn.checkpoint import critic_from_payload, load_checkpoint, save_checkpoint
+from bazarblot.learn.joint_search import JointSearchConfig
 from bazarblot.learn.mistakes import measure_mistakes
 from bazarblot.learn.opponent_pool import OpponentPool
 from bazarblot.learn.parallel import ParallelRollout
 from bazarblot.learn.ppo import PPOConfig, ppo_update
 from bazarblot.learn.rollout import Opponent, collect_rollout
+from bazarblot.learn.scenarios import heart_support
 from bazarblot.learn.signaling import measure_partner_support, measure_signaling
 
 
@@ -56,6 +58,15 @@ class TrainConfig:
     """Constant in the `tanh(margin / reward_scale)` reward squash (spec §6). 24 is the spec's
     recommendation; a larger value saturates later. Changing it rescales the value function, so
     runs with different values are not comparable on loss curves, only on behaviour."""
+    auction_lambda: float | None = None
+    """GAE lambda for auction decisions (None = `lam`). 0 judges each bid by the critic's value of
+    the position it leads to, ultimately the contract reached, instead of by the cards' play."""
+    search_prob: float = 0.0
+    """Share of learner auction decisions in pure self-play deals that run the joint bid search
+    (`learn/joint_search.py`); 0 disables it."""
+    search_deltas: tuple[int, ...] = (1, 2)
+    search_margin: float = 0.02
+    search_evaluate: str = "playout"
     trick_credit: bool = False
     """Credit each card with its trick's points as the trick completes and take the same total off
     the deal's final reward (`learn/rollout.py::play_rollout_deals`): same return, earlier
@@ -390,6 +401,17 @@ def _train_loop(
     parallel: ParallelRollout | None,
 ) -> None:
     best_score = float("-inf")
+    search_config = (
+        JointSearchConfig(
+            prob=config.search_prob,
+            deltas=config.search_deltas,
+            margin=config.search_margin,
+            evaluate=config.search_evaluate,
+            reward_scale=config.reward_scale,
+        )
+        if config.search_prob > 0
+        else None
+    )
     for iteration in range(config.n_iterations):
         forced_bid_prob = _forced_bid_prob_at(iteration, config)
         forced_contra_prob = _forced_contra_prob_at(iteration, config)
@@ -409,6 +431,8 @@ def _train_loop(
                 forced_contra_prob=forced_contra_prob,
                 reward_scale=config.reward_scale,
                 trick_credit=config.trick_credit,
+                lam_auction=config.auction_lambda,
+                search_config=search_config,
             )
         else:
             transitions, stats = collect_rollout(
@@ -427,6 +451,8 @@ def _train_loop(
                 forced_contra_prob=forced_contra_prob,
                 reward_scale=config.reward_scale,
                 trick_credit=config.trick_credit,
+                lam_auction=config.auction_lambda,
+                search_config=search_config,
             )
         t_rollout = time.perf_counter() - t0
 
@@ -506,7 +532,13 @@ def _train_loop(
             f"belief_acc={update_stats.belief_acc:.3f}  "
             f"outcome_acc={update_stats.outcome_acc:.3f}  selfplay[{sp_str}]  "
             f"capped={stats.n_capped}  "
-            f"t=({t_rollout:.1f}s rollout, {t_update:.1f}s update)"
+            + (
+                f"search[n={stats.n_searches} dev={stats.n_search_deviations} "
+                f"rep={stats.n_search_reply_changes}/{stats.n_search_replies}]  "
+                if search_config is not None
+                else ""
+            )
+            + f"t=({t_rollout:.1f}s rollout, {t_update:.1f}s update)"
         )
 
         if (iteration + 1) % config.snapshot_every == 0:
@@ -587,6 +619,9 @@ def _train_loop(
                 )
                 net.train(was_training)
                 print(f"  [mistakes] {mistakes.summary()}")
+                support_8h = heart_support(rules, space, NNAgent(net, sample=False))
+                print(f"  [8H support] {support_8h.summary()}")
+                writer.add_scalar("scenario/8h_fit_raise", support_8h.fit["raise"], iteration)
                 for name in ("failed", "takes_partner_trick", "throws_points", "endgame_loss"):
                     r = mistakes.rate(name)
                     if r is not None:

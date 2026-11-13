@@ -1468,6 +1468,57 @@ Full project suite passes (`pytest`); `ruff check`/`ruff format --check` and `my
 for `torch.distributions` and `Tensor.backward`, a gap in torch's stubs, not this code, the same
 reasoning as the existing `pettingzoo` overrides.
 
+**The "partner never raises" deadlock, and joint bid search (2026-11-12, negative result).** The
+project owner found that partner does not support an opening: "I bid 8 hearts with the jack and two
+other hearts, partner holds the 9 and one more heart; partner must bid at least one more."
+Measured with `learn/scenarios.py::heart_support` (now in every evaluation as `[8H support]`): on
+run A, with a fit partner passes 87% and raises 0%; with no fit it bids another suit 91%. Forcing
+the raise loses about 2 points under the current play, so no single seat gains by changing alone.
+The literature names this exactly (Joint Policy Search, Tian, Gong & Jiang 2020, for bridge
+bidding). Two changes, both fine-tuned from run A for 300 iterations (seed 1, trick credit,
+constant entropy 0.005):
+
+1. `--auction-lambda 0`: each bid is judged by the all-hands critic's value at the seat's next
+   decision (TD(0) in the auction), so in the end by the contract reached, not by how the cards
+   were played afterwards. The "two tables with sides swapped" part of the original idea was not
+   built: the all-hands critic already removes deal luck, opponent-pool deals are already played
+   twice with sides swapped, and in pure self-play both tables would run the same network.
+2. `--search-prob 0.02` (`learn/joint_search.py`): on 2% of auction decisions in pure self-play,
+   try every (my bid, partner's reply) pair from pass, contra/recontra and every type at the
+   standing level +1/+2; finish each auction greedily and score the contract by playing it out
+   greedily on the real hands. If the best pair beats the policy's pair by 0.02, play it (forced,
+   recorded with the network's own log-prob) and let partner best-reply. Scoring by the critic
+   instead was tried first and dropped: 65% of searches deviated, chasing critic error (~13 points
+   per contract).
+
+| | run A (start) | control: lambda 0 | search: lambda 0 + JPS |
+|---|---|---|---|
+| 8H, partner with a fit: raise / pass | 0% / 87% | 0% / 92% | 0% / 100% |
+| 8H, partner without a fit: other suit | 91% | 73% | 1% |
+| deals passed out (self-play, last iteration) | ~1% | 1% | 26% |
+| contracts failed | 19% | 30% | 10% |
+| other suit over partner | 78% | 53% | n/a (no cases) |
+| partner support gap | +0.14 | +0.05 | 0.00 (no raises at all) |
+| vs heuristic (in-run, 200 pairs) | | +10.8 | +4.9 (falling: +9.7, +8.6, +4.9) |
+| card play vs heuristic play | | +3.9 | +2.5 |
+| signaling info gain (nats/card) | | 0.050 | 0.038 |
+
+- **Joint search taught the agent to stop bidding, not to raise.** Search deviated in ~66% of
+  searched decisions; the winning pair was almost always "pass". A passed-out deal scores 0, while
+  under the agent's own play a quarter of contracts fail, so "nobody bids" was the best pair in many
+  searches. Fewer failed contracts here is the agent declining to bid. The margin over the heuristic
+  fell from +9.7 to +4.9.
+- **Judging bids by the contract alone did not produce raises either**, though bidding a different
+  suit over partner fell from 78% to 53% and the margin held at about +11.
+- Search cost: iterations took ~31 s instead of ~14 s (8 workers vs 3).
+- Kept as options, off by default. The heavy final tests (robustness, ablation, 400-deal mistakes)
+  were not run on these two checkpoints; the in-run evaluations already separate them.
+- **What this suggests:** a raise has no value while it carries no information, and no information
+  while it has no value; searching over contracts cannot break that if play does not use the
+  raise. The remaining candidate from the literature is a direct reward for informative bids
+  (Pragmatic/Policy-Belief Learning, Tian et al. 2020): a bid earns a bonus for how much it
+  improves partner's belief about the bidder's hand, decayed to zero over training.
+
 ---
 
 ## M8 — The two-phase experiments (the actual paper)

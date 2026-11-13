@@ -36,6 +36,7 @@ from bazarblot.env.actions import PASS_IDX, ActionSpace
 from bazarblot.env.canonical import (
     canonical_permutation,
     permute_infoset,
+    to_canonical_action,
     to_canonical_mask,
     to_env_action,
 )
@@ -175,6 +176,7 @@ def decide(
     sample: bool,
     forced_bid_prob: float = 0.0,
     forced_contra_prob: float = 0.0,
+    force_env_action: int | None = None,
 ) -> Decision:
     """One full decision: encode `info`, run the network, sample (or, if `sample=False`, take the
     greedy action) under the phase-appropriate hierarchical mask, and package everything
@@ -183,7 +185,11 @@ def decide(
 
     `forced_bid_prob` and `forced_contra_prob` (rollout collection only, see `_auction_decision`)
     bias auction-phase sampling toward a bid or a double without affecting the recorded
-    log-probability's correctness; the returned `Decision.forced` says whether one fired."""
+    log-probability's correctness; the returned `Decision.forced` says whether one fired.
+
+    `force_env_action` (an auction action, real suits) makes the decision take exactly that action,
+    e.g. the one a search chose (`learn/joint_search.py`); it is still scored under the network's
+    own distribution and marked `forced`."""
     # Everything the network sees and chooses is in the standard suit order; only the returned
     # `env_action_idx` uses the real suits.
     perm = canonical_permutation(info)
@@ -194,7 +200,18 @@ def decide(
     with torch.no_grad():
         out = net(obs)
         value = float(out["value"][0].item())
-        if info.phase == Phase.AUCTION:
+        if force_env_action is not None:
+            if info.phase != Phase.AUCTION:
+                raise ValueError("force_env_action is for auction decisions only")
+            action_idx = to_canonical_action(force_env_action, space, perm)
+            if not mask[action_idx]:
+                raise ValueError(f"forced action {force_env_action} is not legal")
+            single = {k: v[0] for k, v in out.items()}
+            log_prob_t, _, _ = _recompute_log_prob_from_output(
+                space, single, mask, info.phase, base_level(info), action_idx
+            )
+            forced = True
+        elif info.phase == Phase.AUCTION:
             action_idx, log_prob_t, forced = _auction_decision(
                 info, space, mask, out, sample, forced_bid_prob, forced_contra_prob
             )

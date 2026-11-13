@@ -338,6 +338,12 @@ as announced, card play now beats the heuristic's by about +3.5 per deal and nee
 throws fell from 5-8% to under 2%; overall about +10 over the heuristic. Bidding barely improved:
 contracts still fail 19-29% of the time (heuristic 7%), and partnership bidding is still absent.
 
+**Partner support, and joint bid search (negative result).** Partner still never raises an opening
+bid with a fit. Judging bids by the contract reached (`--auction-lambda 0`) and a Joint Policy
+Search over (my bid, partner's reply) pairs (`--search-prob`) were tried; neither produced a single
+raise, and the search taught the agent to pass instead (26% of self-play deals passed out, margin
+over the heuristic down from +10 to +5). Both stay as options, off by default.
+
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this
 easy to produce now. It would settle the rounding question empirically and keep re-checking the

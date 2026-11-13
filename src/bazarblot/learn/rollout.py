@@ -44,6 +44,7 @@ from bazarblot.env.canonical import canonical_belief_target
 from bazarblot.env.infoset import info_set
 from bazarblot.env.tracked_deal import TrackedDeal
 from bazarblot.learn.belief import belief_target, privileged_features
+from bazarblot.learn.joint_search import JointSearch, JointSearchConfig
 from bazarblot.learn.reward import SQUASH_SCALE, deal_margin_reward
 
 Opponent = PolicyValueNet | Agent
@@ -70,7 +71,9 @@ class Transition:
     ret: float = 0.0
 
 
-def _gae(transitions: list[Transition], gamma: float, lam: float) -> None:
+def _gae(
+    transitions: list[Transition], gamma: float, lam: float, lam_auction: float | None = None
+) -> None:
     """In-place GAE over one seat's own sub-trajectory within a single deal -- the trajectory
     truly ends when the deal does, so there is no bootstrap past the last transition
     (`next_value = 0` at the start of the backward pass)."""
@@ -78,7 +81,11 @@ def _gae(transitions: list[Transition], gamma: float, lam: float) -> None:
     gae = 0.0
     for t in reversed(transitions):
         delta = t.reward + gamma * next_value - t.value
-        gae = delta + gamma * lam * gae
+        # `lam_auction` (e.g. 0) cuts the auction decisions' credit off at the next decision:
+        # a bid is judged by the critic's value of the position it leads to -- ultimately the
+        # contract reached, at the seat's first card -- not by how the cards were then played.
+        step_lam = lam if lam_auction is None or t.decision.phase == Phase.PLAY else lam_auction
+        gae = delta + gamma * step_lam * gae
         t.advantage = gae
         t.ret = gae + t.value
         next_value = t.value
@@ -122,6 +129,12 @@ class RolloutStats:
     """Contract level of every completed pure-self-play deal (all four seats the learner)."""
     n_selfplay_made: int = 0
     n_selfplay_doubled: int = 0
+    n_searches: int = 0
+    """Joint bid searches run (`learn/joint_search.py`), and how many changed the bid / the
+    partner's reply."""
+    n_search_deviations: int = 0
+    n_search_replies: int = 0
+    n_search_reply_changes: int = 0
 
     @property
     def learner_declare_rate(self) -> float | None:
@@ -150,6 +163,8 @@ def _play_one(
     forced_bid_prob: float = 0.0,
     bid_agent: Agent | None = None,
     forced_contra_prob: float = 0.0,
+    joint_search: JointSearch | None = None,
+    search_rng: random.Random | None = None,
 ) -> tuple[dict[int, list[Transition]], float, bool, DealResult | None, bool]:
     """Play one deal; `seat_actors[seat]` decides seat `seat`'s actions -- either `learner`
     itself, a frozen `PolicyValueNet` snapshot from the opponent pool, or an arbitrary `Agent`
@@ -190,6 +205,9 @@ def _play_one(
     transitions: dict[int, list[Transition]] = {
         s: [] for s in seat_actors if seat_actors[s] is learner
     }
+    # Joint bid search runs only in pure self-play deals (all four seats the learner).
+    searching = joint_search is not None and len(transitions) == 4 and search_rng is not None
+    reply_due: set[int] = set()  # partners owed a best reply to a searched deviation
 
     while deal.phase in (Phase.AUCTION, Phase.PLAY):
         if (
@@ -204,6 +222,16 @@ def _play_one(
         if bid_agent is not None and info.phase == Phase.AUCTION:
             action_idx = bid_agent.act(info, space, mask)
         elif actor is learner:
+            force: int | None = None
+            if searching and info.phase == Phase.AUCTION:
+                assert joint_search is not None and search_rng is not None
+                if seat in reply_due:
+                    reply_due.discard(seat)
+                    force = joint_search.best_reply(tracked)
+                elif search_rng.random() < joint_search.config.prob:
+                    force = joint_search.search(tracked)
+                    if force is not None:
+                        reply_due.add((seat + 2) % 4)
             decision = decide(
                 learner,
                 info,
@@ -212,6 +240,7 @@ def _play_one(
                 sample=True,
                 forced_bid_prob=forced_bid_prob,
                 forced_contra_prob=forced_contra_prob,
+                force_env_action=force,
             )
             transitions[seat].append(
                 Transition(
@@ -271,6 +300,8 @@ def collect_rollout(
     forced_contra_prob: float = 0.0,
     reward_scale: float = SQUASH_SCALE,
     trick_credit: bool = False,
+    lam_auction: float | None = None,
+    search_config: JointSearchConfig | None = None,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
 
@@ -327,8 +358,10 @@ def collect_rollout(
         forced_contra_prob=forced_contra_prob,
         reward_scale=reward_scale,
         trick_credit=trick_credit,
+        search_config=search_config,
+        critic=critic,
     )
-    return finalize_rollout(trajectories, critic, gamma, lam), stats
+    return finalize_rollout(trajectories, critic, gamma, lam, lam_auction), stats
 
 
 def play_rollout_deals(
@@ -345,6 +378,8 @@ def play_rollout_deals(
     forced_contra_prob: float = 0.0,
     reward_scale: float = SQUASH_SCALE,
     trick_credit: bool = False,
+    search_config: JointSearchConfig | None = None,
+    critic: CentralCritic | None = None,
 ) -> tuple[list[list[Transition]], RolloutStats]:
     """The deal-playing half of `collect_rollout`: plays shuffle `i` (deal seed `seed + i`,
     dealer `i % 4`) for every `i` in `deal_indices` and returns each learner seat's trajectory
@@ -353,6 +388,12 @@ def play_rollout_deals(
     disjoint index ranges; `rng` decides opponent sampling."""
     trajectories: list[list[Transition]] = []
     stats = RolloutStats()
+    joint_search = (
+        JointSearch(rules, space, learner, critic, search_config)
+        if search_config is not None and search_config.prob > 0
+        else None
+    )
+    search_rng = random.Random(rng.random())
 
     for i in deal_indices:
         dealer = i % 4
@@ -382,6 +423,8 @@ def play_rollout_deals(
                 forced_bid_prob,
                 bid_agent,
                 forced_contra_prob,
+                joint_search,
+                search_rng,
             )
             stats.n_deals += 1
             stats.n_capped += int(capped)
@@ -422,6 +465,11 @@ def play_rollout_deals(
                 trajectories.append(seat_transitions)
                 stats.n_transitions += len(seat_transitions)
 
+    if joint_search is not None:
+        stats.n_searches = joint_search.stats.searches
+        stats.n_search_deviations = joint_search.stats.deviations
+        stats.n_search_replies = joint_search.stats.replies
+        stats.n_search_reply_changes = joint_search.stats.reply_changes
     return trajectories, stats
 
 
@@ -430,6 +478,7 @@ def finalize_rollout(
     critic: CentralCritic | None,
     gamma: float,
     lam: float,
+    lam_auction: float | None = None,
 ) -> list[Transition]:
     """Baselines (the centralized critic's, if given) and per-trajectory GAE; returns the flat
     transition list in trajectory order."""
@@ -437,7 +486,7 @@ def finalize_rollout(
     if critic is not None and all_transitions:
         _assign_critic_values(critic, all_transitions)
     for seat_transitions in trajectories:
-        _gae(seat_transitions, gamma, lam)
+        _gae(seat_transitions, gamma, lam, lam_auction)
     return all_transitions
 
 
@@ -456,4 +505,8 @@ def merge_stats(parts: Sequence[RolloutStats]) -> RolloutStats:
         out.selfplay_levels.extend(p.selfplay_levels)
         out.n_selfplay_made += p.n_selfplay_made
         out.n_selfplay_doubled += p.n_selfplay_doubled
+        out.n_searches += p.n_searches
+        out.n_search_deviations += p.n_search_deviations
+        out.n_search_replies += p.n_search_replies
+        out.n_search_reply_changes += p.n_search_reply_changes
     return out

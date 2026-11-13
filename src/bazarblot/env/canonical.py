@@ -141,6 +141,11 @@ def to_canonical_mask(
     return out
 
 
+def to_canonical_action(idx: int, space: ActionSpace, perm: SuitPermutation) -> int:
+    """A real action index -> the relabeled-frame index."""
+    return int(_index_map(space, perm)[idx])
+
+
 def to_env_action(idx: int, space: ActionSpace, perm: SuitPermutation) -> int:
     """A relabeled-frame action index -> the real action index."""
     return int(_index_map(space, invert(perm))[idx])

@@ -39,6 +39,7 @@ from bazarblot.agents.random_agent import RandomAgent
 from bazarblot.core.deal import Phase
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import build_action_space
+from bazarblot.learn.joint_search import JointSearchConfig
 from bazarblot.learn.reward import SQUASH_SCALE
 from bazarblot.learn.rollout import (
     Opponent,
@@ -160,6 +161,9 @@ class _Task:
     forced_contra_prob: float
     reward_scale: float
     trick_credit: bool = False
+    search_config: JointSearchConfig | None = None
+    critic_state: dict[str, torch.Tensor] | None = None
+    critic_hidden: tuple[int, ...] = (256, 256)
 
 
 def _worker(
@@ -194,6 +198,11 @@ def _worker(
             build_fixed_opponent(n, rules, base_seed + task.worker_seed) for n in fixed_names
         ]
         pool: list[Opponent] = [*fixed, *(snapshots[v] for v in task.active_versions)]
+        critic: CentralCritic | None = None
+        if task.critic_state is not None:
+            critic = CentralCritic(hidden=task.critic_hidden)
+            critic.load_state_dict(task.critic_state)
+            critic.eval()
         torch.manual_seed(task.worker_seed)
         t0 = time.perf_counter()
         trajectories, stats = play_rollout_deals(
@@ -210,6 +219,8 @@ def _worker(
             forced_contra_prob=task.forced_contra_prob,
             reward_scale=task.reward_scale,
             trick_credit=task.trick_credit,
+            search_config=task.search_config,
+            critic=critic,
         )
         packed = pack_trajectories(trajectories) if trajectories else None
         conn.send((packed, stats, time.perf_counter() - t0))
@@ -268,6 +279,8 @@ class ParallelRollout:
         forced_contra_prob: float = 0.0,
         reward_scale: float = SQUASH_SCALE,
         trick_credit: bool = False,
+        lam_auction: float | None = None,
+        search_config: JointSearchConfig | None = None,
     ) -> tuple[list[Transition], RolloutStats]:
         """Same contract as `rollout.collect_rollout` (shuffle `i` uses deal seed `seed + i`),
         with `snapshots` given as `(version, net)` pairs; a version's weights are sent once."""
@@ -278,6 +291,13 @@ class ParallelRollout:
             if v not in self._sent_versions
         }
         active = [v for v, _ in snapshots]
+        # The critic is needed in the workers only to search with critic scoring.
+        critic_search = search_config is not None and search_config.evaluate == "critic"
+        critic_state = (
+            {k: v.detach().clone() for k, v in critic.state_dict().items()}
+            if critic is not None and critic_search
+            else None
+        )
         chunks = [list(range(n_deals))[k :: self.n_workers] for k in range(self.n_workers)]
         for k, (conn, chunk) in enumerate(zip(self._conns, chunks, strict=True)):
             conn.send(
@@ -293,6 +313,9 @@ class ParallelRollout:
                     forced_contra_prob=forced_contra_prob,
                     reward_scale=reward_scale,
                     trick_credit=trick_credit,
+                    search_config=search_config,
+                    critic_state=critic_state,
+                    critic_hidden=tuple(critic.hidden) if critic is not None else (256, 256),
                 )
             )
         self._sent_versions.update(new)
@@ -305,7 +328,7 @@ class ParallelRollout:
             trajectories.extend(unpack_trajectories(packed))
             parts.append(stats)
             self.last_worker_seconds.append(seconds)
-        return finalize_rollout(trajectories, critic, gamma, lam), merge_stats(parts)
+        return finalize_rollout(trajectories, critic, gamma, lam, lam_auction), merge_stats(parts)
 
     def close(self) -> None:
         for conn in self._conns:

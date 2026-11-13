@@ -28,6 +28,21 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--forced-bid-anneal-frac", type=float, default=1.0)
     p.add_argument("--reward-scale", type=float, default=24.0)
     p.add_argument(
+        "--auction-lambda",
+        type=float,
+        default=None,
+        help="GAE lambda for auction decisions (0 = judge bids by the contract reached)",
+    )
+    p.add_argument(
+        "--search-prob",
+        type=float,
+        default=0.0,
+        help="share of self-play auction decisions that run the joint bid search",
+    )
+    p.add_argument("--search-deltas", type=str, default="1,2")
+    p.add_argument("--search-margin", type=float, default=0.02)
+    p.add_argument("--search-evaluate", choices=["playout", "critic"], default="playout")
+    p.add_argument(
         "--trick-credit",
         action="store_true",
         help="credit card points as each trick completes (same total reward)",
@@ -103,6 +118,11 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         forced_bid_anneal_frac=args.forced_bid_anneal_frac,
         reward_scale=args.reward_scale,
         trick_credit=args.trick_credit,
+        auction_lambda=args.auction_lambda,
+        search_prob=args.search_prob,
+        search_deltas=tuple(int(x) for x in args.search_deltas.split(",") if x),
+        search_margin=args.search_margin,
+        search_evaluate=args.search_evaluate,
         forced_contra_prob_start=args.forced_contra_prob_start,
         forced_contra_prob_end=args.forced_contra_prob_end,
         bid_agent=args.bid_agent,
