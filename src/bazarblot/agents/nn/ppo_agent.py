@@ -33,6 +33,12 @@ from bazarblot.agents.nn.network import (
 )
 from bazarblot.core.deal import Phase
 from bazarblot.env.actions import PASS_IDX, ActionSpace
+from bazarblot.env.canonical import (
+    canonical_permutation,
+    permute_infoset,
+    to_canonical_mask,
+    to_env_action,
+)
 from bazarblot.env.infoset import InfoSet
 from bazarblot.env.obs import encode, flatten
 
@@ -66,6 +72,12 @@ class Decision:
     recorded `log_prob` is still the network's own probability of that action, but such an
     action can be extremely unlikely under the policy, so `learn/ppo.py` keeps it out of the KL
     estimate that decides when to stop updating."""
+    env_action_idx: int = -1
+    """The real action index to step the game with. `action_idx`, `obs` and `mask` are in the
+    standard suit order the network sees (`env/canonical.py`); this is the same action with the
+    real suits. -1 when unknown (a decision rebuilt from packed training data)."""
+    perm: tuple[int, int, int, int] = (0, 1, 2, 3)
+    """The suit relabeling used for this decision (`perm[real suit] = slot`)."""
 
 
 def _auction_decision(
@@ -172,6 +184,11 @@ def decide(
     `forced_bid_prob` and `forced_contra_prob` (rollout collection only, see `_auction_decision`)
     bias auction-phase sampling toward a bid or a double without affecting the recorded
     log-probability's correctness; the returned `Decision.forced` says whether one fired."""
+    # Everything the network sees and chooses is in the standard suit order; only the returned
+    # `env_action_idx` uses the real suits.
+    perm = canonical_permutation(info)
+    info = permute_infoset(info, perm)
+    mask = to_canonical_mask(mask, space, perm)
     obs_np = flatten(encode(info)).astype(np.float32)
     obs = torch.from_numpy(obs_np).unsqueeze(0)
     with torch.no_grad():
@@ -195,6 +212,8 @@ def decide(
         phase=info.phase,
         base_level=base_level(info) if info.phase == Phase.AUCTION else 0,
         forced=forced,
+        env_action_idx=to_env_action(action_idx, space, perm),
+        perm=perm,
     )
 
 
@@ -303,4 +322,4 @@ class NNAgent:
         self.sample = sample
 
     def act(self, info: InfoSet, space: ActionSpace, legal_mask: BoolArray) -> int:
-        return decide(self.net, info, space, legal_mask, sample=self.sample).action_idx
+        return decide(self.net, info, space, legal_mask, sample=self.sample).env_action_idx

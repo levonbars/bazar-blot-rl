@@ -25,7 +25,8 @@ def test_obs_version_is_stamped() -> None:
     # comparing with the bid (v1 added raw combination points to a scaled card total). Checkpoints
     # trained on v1 are refused by `learn/checkpoint.py`, as the version rule intends.
     # v3: `auction_history`/`auction_meta` show the whole auction from its first action.
-    assert OBS_VERSION == "v3"
+    # v4: combinations follow the public announcement timeline; `trick_state`/`card_power` added.
+    assert OBS_VERSION == "v4"
 
 
 def test_auction_history_keeps_the_opening_bid_through_play() -> None:

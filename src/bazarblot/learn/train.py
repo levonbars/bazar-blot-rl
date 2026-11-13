@@ -36,6 +36,7 @@ from bazarblot.env.actions import ActionSpace, build_action_space
 from bazarblot.eval.behavior import evaluate_behavior
 from bazarblot.eval.metrics import evaluate_pairs
 from bazarblot.learn.checkpoint import critic_from_payload, load_checkpoint, save_checkpoint
+from bazarblot.learn.mistakes import measure_mistakes
 from bazarblot.learn.opponent_pool import OpponentPool
 from bazarblot.learn.parallel import ParallelRollout
 from bazarblot.learn.ppo import PPOConfig, ppo_update
@@ -55,6 +56,10 @@ class TrainConfig:
     """Constant in the `tanh(margin / reward_scale)` reward squash (spec §6). 24 is the spec's
     recommendation; a larger value saturates later. Changing it rescales the value function, so
     runs with different values are not comparable on loss curves, only on behaviour."""
+    trick_credit: bool = False
+    """Credit each card with its trick's points as the trick completes and take the same total off
+    the deal's final reward (`learn/rollout.py::play_rollout_deals`): same return, earlier
+    feedback for card play."""
     ppo: PPOConfig = field(default_factory=PPOConfig)
     entropy_coef_start: float = 0.05
     entropy_coef_end: float = 0.02
@@ -112,6 +117,9 @@ class TrainConfig:
     pairs). It beats heuristic play by about +2, which beats random play by about +4."""
     support_deals: int = 200
     """Greedy self-play deals for the partner-support probe at each evaluation; 0 disables."""
+    mistake_deals: int = 200
+    """Greedy self-play deals for the obvious-mistake counts (`learn/mistakes.py`) at each
+    evaluation; 0 disables."""
     n_workers: int = 0
     """Worker processes playing rollout deals (`learn/parallel.py`); 0 = play them in the main
     process. Fixed opponents must then be ones a worker can rebuild by name (not `clone`)."""
@@ -400,6 +408,7 @@ def _train_loop(
                 critic=critic,
                 forced_contra_prob=forced_contra_prob,
                 reward_scale=config.reward_scale,
+                trick_credit=config.trick_credit,
             )
         else:
             transitions, stats = collect_rollout(
@@ -417,6 +426,7 @@ def _train_loop(
                 critic=critic,
                 forced_contra_prob=forced_contra_prob,
                 reward_scale=config.reward_scale,
+                trick_credit=config.trick_credit,
             )
         t_rollout = time.perf_counter() - t0
 
@@ -569,6 +579,18 @@ def _train_loop(
                 print(f"  [partner support] {support.summary()}")
                 if support.support_gap is not None:
                     writer.add_scalar("signaling/support_gap", support.support_gap, iteration)
+            if config.mistake_deals > 0:
+                was_training = net.training
+                net.eval()
+                mistakes = measure_mistakes(
+                    rules, space, NNAgent(net, sample=False), n_deals=config.mistake_deals
+                )
+                net.train(was_training)
+                print(f"  [mistakes] {mistakes.summary()}")
+                for name in ("failed", "takes_partner_trick", "throws_points", "endgame_loss"):
+                    r = mistakes.rate(name)
+                    if r is not None:
+                        writer.add_scalar(f"mistakes/{name}", r, iteration)
             if bid_agent is None and config.play_eval_pairs > 0:
                 play_seeds = seeds[: config.play_eval_pairs]
                 play_dealers = dealers[: config.play_eval_pairs]

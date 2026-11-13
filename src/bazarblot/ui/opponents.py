@@ -6,7 +6,8 @@ Three kinds, chosen per game:
 - `simple` — the original toy UI bot (`ui/bots.py`).
 
 Trained checkpoints are listed from `checkpoints/*/final.pt` (or `$BAZARBLOT_CHECKPOINTS`, a
-glob), keeping only those the current code can load (same observation version and rules). Loaded
+glob), newest first, keeping only those the current code can load (same observation version and
+rules). Loaded
 networks are cached for the life of the server.
 """
 
@@ -25,7 +26,6 @@ from bazarblot.agents.heuristic import HeuristicAgent
 from bazarblot.core.rules import RuleConfig
 
 DEFAULT_GLOB = "checkpoints/*/final.pt"
-PREFERRED = "checkpoints/m7_long_s1/final.pt"  # best of the three long-baseline seeds
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,7 @@ def _compatible(path: str, rules: RuleConfig) -> bool:
 
 
 def available_bots(rules: RuleConfig) -> list[BotOption]:
-    """Bot choices for the UI, the preferred trained checkpoint first when present."""
+    """Bot choices for the UI: loadable trained checkpoints, newest first, then the fixed bots."""
     global _listing
     with _lock:
         if _listing is None:
@@ -62,8 +62,8 @@ def available_bots(rules: RuleConfig) -> list[BotOption]:
             try:
                 import torch  # noqa: F401
 
-                paths = sorted(glob.glob(os.environ.get("BAZARBLOT_CHECKPOINTS", DEFAULT_GLOB)))
-                paths.sort(key=lambda p: p != PREFERRED)
+                pattern = os.environ.get("BAZARBLOT_CHECKPOINTS", DEFAULT_GLOB)
+                paths = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
                 for p in paths:
                     if _compatible(p, rules):
                         name = Path(p).parent.name

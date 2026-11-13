@@ -270,3 +270,44 @@ def test_auction_hitting_the_step_cap_is_scored_as_an_abort() -> None:
     assert stats.n_capped > 0
     assert stats.n_aborted >= stats.n_capped
     assert any(t.outcome_target == OUTCOME_ABORT for t in transitions)
+
+
+def test_trick_credit_spreads_the_same_return_over_the_tricks() -> None:
+    """Same deals and actions with and without `trick_credit`: every seat's return (sum of its
+    rewards) is unchanged, but card plays now carry their tricks' points as they happen."""
+    from bazarblot.core.deal import Phase
+    from bazarblot.learn.rollout import play_rollout_deals
+
+    def run(credit: bool):  # type: ignore[no-untyped-def]
+        torch.manual_seed(0)
+        net = build_network(RULES)
+        with torch.no_grad():
+            net.meta_head.bias[0] += 1.0  # pass more often, so auctions end and cards get played
+        import random
+
+        trajectories, _ = play_rollout_deals(
+            RULES,
+            SPACE,
+            net,
+            range(20),
+            7,
+            random.Random(0),
+            reward_scale=96.0,
+            trick_credit=credit,
+        )
+        return trajectories
+
+    plain, credited = run(False), run(True)
+    assert len(plain) == len(credited) > 0
+    n_play_rewards = 0
+    for a, b in zip(plain, credited, strict=True):
+        assert [t.decision.action_idx for t in a] == [t.decision.action_idx for t in b]
+        assert sum(t.reward for t in a) == pytest.approx(sum(t.reward for t in b), abs=1e-9)
+        plays = [t for t in b if t.decision.phase == Phase.PLAY]
+        n_play_rewards += sum(t.reward != 0.0 for t in plays[:-1])
+        # over a full deal, a seat's credited points are its team's card points minus the
+        # opponents' (all 162 points, last-trick bonus included, go to one side or the other)
+        if len(plays) == RULES.deal.cards_per_player:
+            total = sum(t.trick_points for t in plays)
+            assert abs(total) <= 162 and (total + 162) % 2 == 0
+    assert n_play_rewards > 0

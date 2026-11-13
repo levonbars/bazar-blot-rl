@@ -1412,6 +1412,56 @@ run. (2) Met. (3) Met in the measured sense (both probes above control), but far
 convention the project owner described. This is the baseline the partnership experiments are
 compared against.
 
+**Obvious mistakes, and observation v4 (2026-11-12).** The project owner played the long-baseline
+agents in the UI and found many obvious bidding and play mistakes. Measured (`learn/mistakes.py`,
+greedy self-play, 400 deals, heuristic for reference): contracts failed 22-29% (heuristic 7%);
+bidding a different suit over partner 65%; last to play with partner winning, takes partner's trick
+11-13% (6%); last to play, throws an Ace or Ten to the opponents when a cheaper card was legal 5-8%
+(0%); with 3 or fewer cards each, plays a card that loses points by exact solve 16-17% (19%). "+7
+over the heuristic" mostly measured a weak, cautious heuristic bidder. Likely causes in the setup,
+not the amount of data (~32M cards played per run): the network was never told who is winning the
+trick or how cards rank under the contract, and had to learn each trump suit separately; and a card
+point is ~1% of the reward scale, so throwing a Ten was nearly invisible to training. Changes:
+
+1. Observation v4 (1,286 floats): every decision is relabeled into a standard suit order
+   (`env/canonical.py`: trump first, then the seat's own suits by holding); new `trick_state` and
+   `card_power` blocks (who is winning, which of my cards would win, rank and points under the
+   contract, master cards); combinations follow the public timeline (`core/announcements.py`).
+   v3 checkpoints no longer load.
+2. `--trick-credit`: each card is credited with its trick's points as the trick completes and the
+   deal's final reward is reduced by the same total, so the return is unchanged.
+3. Mistake counts in every evaluation (`[mistakes]`) and `python -m bazarblot.cli.mistakes`.
+
+Two runs, long-baseline settings, seed 0: A (`m7_v4_credit_s0`) with all three, B
+(`m7_v4_plain_s0`) without the trick credit. Final tests on held-out seeds:
+
+| | v3 long baseline (s0 / s1) | A: v4 + credit | B: v4 | heuristic |
+|---|---|---|---|---|
+| contracts failed | 29% / 22% | **19%** | 29% | 7% |
+| other suit over partner | 65% / 66% | 78% | 79% | n/a |
+| takes partner's trick | 13% / 11% | 10% | 10% | 6% |
+| throws A/10 | 5% / 8% | **1.7%** | **1.7%** | 0% |
+| endgame loses points | 16% / 17% | **11%** | 13% | 19% |
+| ducks a 10+ trick | 3% / 4% | 5% | 2% | 0% |
+| ablation: play only | +1.2 / +0.8 | **+3.5** | **+4.0** | |
+| ablation: bidding only | +4.7 / +4.3 | +4.8 | +4.9 | |
+| ablation: full | +7.6 / +6.3 | **+9.9** | **+10.9** | |
+| vs heuristic, offsets -6 / 0 / +12 | +10.5 / +7.4 / +29.1 (s0) | +13.6 / +9.3 / +34.6 | +14.3 / +10.6 / +35.4 | |
+| self-play made / declaring worth | 0.72 / +10.1 (s0) | 0.77 / +13.4 | 0.70 / +8.9 | |
+| partner support gap (in-run, final) | +0.05 to +0.10 | +0.14 | +0.07 | |
+
+- **Card play improved a lot, from the observation change.** Learned play now beats heuristic play
+  by +3.5 to +4.0 (was +0.8 to +1.2) and beats PIMC endgame play in-run (+1.0 to +1.6, was -0.2
+  to -1.4); needless Ace/Ten throws fell from 5-8% to 1.7%. Both runs show it, so it does not
+  depend on the trick credit.
+- **The trick credit's effect is unclear from one seed each.** A fails fewer contracts (19% vs
+  29%) and declaring is worth more (+13.4 vs +8.9), but B is level or slightly ahead on margin
+  (CIs overlap). It is kept on for now; a second seed of each would settle it.
+- **Bidding barely changed.** Contracts still fail 2.7-4x as often as the heuristic's, bidding
+  over partner in another suit rose to ~78%, and support for partner's suit is still near zero
+  in most evaluations. Nothing in these changes targeted bidding; the next step does (credit bids
+  by the contract they reach, using the all-hands critic).
+
 Full project suite passes (`pytest`); `ruff check`/`ruff format --check` and `mypy
 --strict` are clean on every changed and new file. A new `[[tool.mypy.overrides]]` entry relaxes
 `disallow_untyped_calls` for `agents.nn.*`/`learn.*` specifically — torch ships incomplete stubs

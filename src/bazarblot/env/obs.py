@@ -7,11 +7,10 @@ shape or semantics change — a silent version drift is a silent, undetectable t
 % 4`, never by absolute seat: `0 = me, 1 = left opponent, 2 = partner, 3 = right opponent`. One
 network then serves all four seats.
 
-**Suit canonicalization is deliberately NOT done here (§4.2).** It's an augmentation applied to
-the underlying game objects (a permutation of card ids) *before* `info_set()`/`encode()` ever
-run — see `env/augment.py`. `encode()` just encodes whatever suits the cards it's given nominally
-have; baking the permutation into the encoder would make it impossible to reuse the same encoder
-for both the identity case and every augmented sample.
+**Suit order is not decided here.** The network agent puts every `InfoSet` into a standard suit
+order before encoding it (`env/canonical.py`, applied in `agents/nn/ppo_agent.py::decide`), so
+what it learns about one suit applies to all four. `encode()` itself encodes whatever suit labels
+it is given.
 
 Every block's shape is fixed by config-derived constants (`MAX_BID`, `N_CARDS`, ...), computed
 once at import time for the shipped preset — see `BLOCK_SHAPES`. A rules preset that changes
@@ -25,8 +24,9 @@ ambiguity, not an oversight — see the inline comment at each site):
   could support; both leave explicit, documented zero-padding as headroom for `v2`.
 - `voids` tracks the 3 non-"primary" suits only (primary = trump under a trump contract, or a
   fixed arbitrary suit under `NT`, where the concept doesn't really apply) — see `_primary_suit`.
-- Combination-derived features (`own_combinations`, `melds_public`) are valid only under the
-  shipped preset's `staging.declarations_are_actions = False`; see `env/infoset.py`.
+- Combination-derived features (`own_combinations`, `melds_public`, `contract_progress`) are valid
+  only under the shipped preset's `staging.declarations_are_actions = False`; they follow the
+  public announcement timeline (`core/announcements.py`), see `env/infoset.py`.
 """
 
 from __future__ import annotations
@@ -34,15 +34,17 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
+from bazarblot.core.announcements import Announcement
 from bazarblot.core.auction import BidAction, ContraAction, PassAction, RecontraAction
 from bazarblot.core.cards import N_CARDS, RANKS, SUITS, TEAM_OF, ContractType, card_id, suit_of
-from bazarblot.core.declarations import Meld, detect_hand_melds, resolve_combinations_from_melds
+from bazarblot.core.deal import Phase
+from bazarblot.core.declarations import Meld, detect_hand_melds
 from bazarblot.core.play import current_winner
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.infoset import InfoSet
 from bazarblot.env.tracked_deal import AuctionEvent
 
-OBS_VERSION = "v3"
+OBS_VERSION = "v4"
 
 Array = npt.NDArray[np.float32]
 
@@ -90,6 +92,10 @@ BLOCK_SHAPES: dict[str, tuple[int, ...]] = {
     "bid_recent": (_BID_RECENT_LEN, 16),  # auction phase only
     "auction_history": (_AUCTION_HISTORY_LEN, 16),  # v3: from the first action, every phase
     "auction_meta": (2,),  # v3: auction length / 24 (clipped), history-truncated flag
+    # v4: trick facts the network previously had to rediscover per trump suit (see
+    # `_trick_state_block` / `_card_power_block`)
+    "trick_state": (6,),
+    "card_power": (N_CARDS, 5),
 }
 
 
@@ -222,15 +228,11 @@ def _bid_payout_block(
 
 
 def _own_melds(info: InfoSet, contract_type: ContractType) -> tuple[Meld, ...] | list[Meld]:
-    # `info.melds_by_seat` (once populated — PLAY/TERMINAL only) is always detected against the
-    # FINAL fixed `info.contract.contract_type`, which is exactly what `_effective_contract`
-    # returns once a contract exists — so it's always safe to reuse rather than re-detecting the
-    # same melds from `info.original_hand` a second time. During AUCTION, `melds_by_seat` is
-    # still `None` (nothing to reuse — no contract exists yet), so this falls back to detecting
-    # fresh. Found via profiling (M6): `detect_hand_melds`/`detect_all_melds` were among the
-    # hottest paths in `encode()`, largely from being called twice per decision for no reason.
-    if info.melds_by_seat is not None and contract_type == info.contract.contract_type:  # type: ignore[union-attr]
-        return info.melds_by_seat[info.seat]
+    # `info.own_melds` (PLAY/TERMINAL only) is detected against the final contract type, which is
+    # what `_effective_contract` returns once a contract exists, so it is reused; during the
+    # auction there is no contract yet and melds are detected fresh against the standing bid.
+    if info.own_melds is not None and contract_type == info.contract.contract_type:  # type: ignore[union-attr]
+        return info.own_melds
     return detect_hand_melds(info.original_hand, info.seat, contract_type, info.rules)
 
 
@@ -322,59 +324,54 @@ _CARRE_ANSWER_RANKS = ("J", "9", "A", "10", "K", "Q")  # spec §3.1's SAY_CARRE_
 # meld to announce" for this purpose, even though `detect_hand_melds` still detects it structurally.
 
 
+def _played_to_first_trick(info: InfoSet, seat: int) -> bool:
+    if info.tricks:
+        return True
+    return any(s == seat for s, _ in info.current_trick)
+
+
 def _melds_public_block(info: InfoSet) -> Array:
+    """Per seat, what the table has been TOLD about its combinations (v4, `core/announcements.py`):
+    the class it announced at hand 1, the best combination it showed at hand 2 (top card, trump
+    bit, carre rank), and whether it has said blot / reblot. Row layout (28): class one-hot(5),
+    top-card one-hot(9), trump bit(2), carre-rank one-hot(7), then [hand-1 turn passed, has shown,
+    shown value / 200, blot said, reblot said]."""
     out = np.zeros(BLOCK_SHAPES["melds_public"], dtype=np.float32)
-    if info.melds_by_seat is None:
-        return out
-    top_rank_onehot_n, trump_bit_n, carre_rank_onehot_n = 9, 2, 1 + len(_CARRE_ANSWER_RANKS)
+    if info.contract is None:
+        return out  # nothing can have been announced before there is a contract
+    by_seat: dict[int, list[Announcement]] = {s: [] for s in range(4)}
+    for a in info.announcements:
+        by_seat[a.seat].append(a)
     for seat in range(4):
         rel = _rel(seat, info.seat)
-        melds = info.melds_by_seat[seat]
-        comparable = [
-            m
-            for m in melds
-            if m.kind != "blot_reblot" and not (m.kind == "carre" and m.rank in ("7", "8"))
-        ]
-        blot_reblot = next((m for m in melds if m.kind == "blot_reblot"), None)
+        calls = by_seat[seat]
         class_onehot = np.zeros(5, dtype=np.float32)
-        top_onehot = np.zeros(top_rank_onehot_n, dtype=np.float32)
-        trump_bit = np.zeros(trump_bit_n, dtype=np.float32)
-        carre_rank_onehot = np.zeros(carre_rank_onehot_n, dtype=np.float32)
-        if comparable:
-            best = max(comparable, key=lambda m: m.value)
-            class_onehot[_MELD_CLASS.index(_meld_class_of(best))] = 1.0
+        top_onehot = np.zeros(9, dtype=np.float32)
+        trump_bit = np.zeros(2, dtype=np.float32)
+        carre_rank_onehot = np.zeros(1 + len(_CARRE_ANSWER_RANKS), dtype=np.float32)
+        cls = next((a.kind for a in calls if a.kind in _MELD_CLASS), "none")
+        class_onehot[_MELD_CLASS.index(cls)] = 1.0
+        shown = [m for a in calls if a.kind == "show" for m in a.melds]
+        top_onehot[0] = trump_bit[0] = carre_rank_onehot[0] = 1.0
+        if shown:
+            best = max(shown, key=lambda m: (m.kind == "carre", m.value, m.length))
             if best.kind == "sequence":
                 assert best.rank is not None
+                top_onehot[0] = 0.0
                 top_onehot[1 + RANKS.index(best.rank)] = 1.0
-                trump_bit[int(best.is_trump)] = 1.0
-            else:
-                top_onehot[0] = 1.0  # "none" — carre discloses rank, not a top card
-                trump_bit[0] = 1.0  # "unknown" slot doubles as "n/a" here
-            if best.kind == "carre":
-                assert best.rank is not None
+                trump_bit[0] = 0.0
+                trump_bit[1] = float(best.is_trump)
+            elif best.rank in _CARRE_ANSWER_RANKS:
+                carre_rank_onehot[0] = 0.0
                 carre_rank_onehot[1 + _CARRE_ANSWER_RANKS.index(best.rank)] = 1.0
-            else:
-                carre_rank_onehot[0] = 1.0
-        else:
-            class_onehot[0] = 1.0
-            top_onehot[0] = 1.0
-            trump_bit[0] = 1.0
-            carre_rank_onehot[0] = 1.0
-        was_questioned = 0.0  # no staged protocol exists yet (declarations_are_actions=False)
-        has_shown = float(bool(comparable))  # auto-show: true the instant a meld is held
-        announced_but_withheld = 0.0
-        belote = float(blot_reblot is not None)
-        rebelote = float(blot_reblot is not None)  # single combined Meld — see module docstring
-
-        row = np.concatenate(
-            [
-                class_onehot,
-                top_onehot,
-                trump_bit,
-                carre_rank_onehot,
-                [was_questioned, has_shown, announced_but_withheld, belote, rebelote],
-            ]
-        )
+        flags = [
+            float(_played_to_first_trick(info, seat)),
+            float(bool(shown)),
+            sum(m.value for m in shown) / 200,
+            float(any(a.kind == "blot" for a in calls)),
+            float(any(a.kind == "reblot" for a in calls)),
+        ]
+        row = np.concatenate([class_onehot, top_onehot, trump_bit, carre_rank_onehot, flags])
         assert row.shape == (28,)
         out[rel] = row
     return out
@@ -413,20 +410,17 @@ def _contract_progress_block(info: InfoSet) -> Array:
     played_points = sum(sum(info.tables.points[c] for _, c in t) for t in info.tricks)
     points_still_available = 162 - played_points
 
+    # Combination points the attackers are KNOWN to have: what they have shown (the comparison's
+    # winning team shows at hand 2) plus 20 per reblot said. Before v4 this used every seat's
+    # dealt melds, which the table does not know.
     combo_a = 0
-    if info.melds_by_seat is not None:
-        # Elder hand for meld tie-breaking is the trick-1 leader — reconstructible as whoever
-        # led the very first completed trick, or the current trick's leader before any trick
-        # has completed yet (both are the same seat in practice: the trick-1 leader never
-        # changes mid-deal).
-        leader_seat = info.tricks[0][0][0] if info.tricks else (info.trick_leader or 0)
-        # `info.melds_by_seat` is already the detected melds (cached per-deal by `info_set()` —
-        # see `TrackedDeal.melds_cache`), so go straight to the comparison/scoring half instead
-        # of flattening back into hands and re-detecting via `resolve_combinations` (M6: this
-        # re-detection was the single largest remaining cost in a full self-play step).
-        all_melds = [m for seat_melds in info.melds_by_seat for m in seat_melds]
-        combo = resolve_combinations_from_melds(all_melds, info.rules, leader_seat)
-        combo_a = combo.team_points[attacking_team]
+    for a in info.announcements:
+        if TEAM_OF[a.seat] != attacking_team:
+            continue
+        if a.kind == "show":
+            combo_a += sum(m.value for m in a.melds)
+        elif a.kind == "reblot":
+            combo_a += info.rules.combinations.blot_reblot
 
     # Same basis the engine uses to decide whether a contract is made (`core/scoring.py`):
     # raw card points plus raw combination points against `10 * level`. v1 of this feature
@@ -448,6 +442,47 @@ def _contract_progress_block(info: InfoSet) -> Array:
     out[2] = need_met_sign
     out[3] = float(capot_still_live)
     out[4] = float(capot_already_broken)
+    return out
+
+
+def _trick_state_block(info: InfoSet) -> Array:
+    """Who is winning the current trick (rel one-hot, 4) and its points so far (/ 40); plus
+    "leading" (empty trick) as the 6th channel. Zeros outside card play."""
+    out = np.zeros(BLOCK_SHAPES["trick_state"], dtype=np.float32)
+    if info.phase != Phase.PLAY or info.tables is None:
+        return out
+    if not info.current_trick:
+        out[5] = 1.0
+        return out
+    winner = current_winner(info.current_trick, info.tables)
+    out[_rel(winner, info.seat)] = 1.0
+    out[4] = sum(info.tables.points[c] for _, c in info.current_trick) / 40
+    return out
+
+
+def _card_power_block(info: InfoSet) -> Array:
+    """Per card, under the contract: [would win the current trick if I played it now (my cards
+    only, 0 when leading), is trump, rank within its suit (0 = lowest, 1 = highest), points / 11,
+    is the highest card of its suit not yet played (a master card)]. Public facts of the rules
+    plus my own hand; zeros before a contract exists."""
+    out = np.zeros(BLOCK_SHAPES["card_power"], dtype=np.float32)
+    t = info.tables
+    if t is None:
+        return out
+    played: set[int] = {c for trick in info.tricks for _, c in trick}
+    played |= {c for _, c in info.current_trick}
+    for suit in SUITS:
+        cards = sorted((card_id(suit, r) for r in RANKS), key=lambda c: t.strength[c])
+        remaining = [c for c in cards if c not in played]
+        top = remaining[-1] if remaining else None
+        for i, c in enumerate(cards):
+            out[c, 1] = float(t.is_trump[c])
+            out[c, 2] = i / (len(cards) - 1)
+            out[c, 3] = t.points[c] / 11
+            out[c, 4] = float(c == top)
+    if info.phase == Phase.PLAY and info.current_trick:
+        for c in info.hand:
+            out[c, 0] = float(current_winner([*info.current_trick, (info.seat, c)], t) == info.seat)
     return out
 
 
@@ -564,6 +599,8 @@ def encode(info: InfoSet) -> dict[str, Array]:
         "bid_recent": _bid_recent_block(info),
         "auction_history": _auction_history_block(info),
         "auction_meta": _auction_meta_block(info),
+        "trick_state": _trick_state_block(info),
+        "card_power": _card_power_block(info),
     }
     return blocks
 

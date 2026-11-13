@@ -32,6 +32,12 @@ from bazarblot.core.deal import Deal, Phase
 from bazarblot.core.dealing import deal_hands
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import ActionSpace, legal_mask
+from bazarblot.env.canonical import (
+    canonical_belief_target,
+    canonical_permutation,
+    permute_infoset,
+    to_canonical_mask,
+)
 from bazarblot.env.infoset import InfoSet, info_set
 from bazarblot.env.obs import encode, flatten
 from bazarblot.env.tracked_deal import AuctionEvent, TrackedDeal
@@ -136,11 +142,14 @@ def _probe(
     mask: np.ndarray,  # type: ignore[type-arg]
     deal: Deal,
 ) -> tuple[float | None, bool]:
-    target = belief_target(deal.hands, info.seat)
+    # The network works in the standard suit order (`env/canonical.py`); silencing partner's bids
+    # changes neither my hand nor the contract, so both observations share one relabeling.
+    perm = canonical_permutation(info)
+    target = canonical_belief_target(belief_target(deal.hands, info.seat), perm)
     partner_cards = np.nonzero(target == _PARTNER)[0]
-    obs = torch.from_numpy(
-        np.stack([flatten(encode(info)), flatten(encode(silence_partner(info)))])
-    )
+    mask = to_canonical_mask(mask, space, perm)
+    real, silenced = permute_infoset(info, perm), permute_infoset(silence_partner(info), perm)
+    obs = torch.from_numpy(np.stack([flatten(encode(real)), flatten(encode(silenced))]))
     with torch.no_grad():
         out = net(obs)
     log_p = torch.log_softmax(out["belief"], dim=-1).numpy()  # (2, 32, 3)

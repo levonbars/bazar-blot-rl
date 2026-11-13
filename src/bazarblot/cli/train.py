@@ -27,6 +27,11 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--forced-bid-prob-end", type=float, default=0.05)
     p.add_argument("--forced-bid-anneal-frac", type=float, default=1.0)
     p.add_argument("--reward-scale", type=float, default=24.0)
+    p.add_argument(
+        "--trick-credit",
+        action="store_true",
+        help="credit card points as each trick completes (same total reward)",
+    )
     p.add_argument("--forced-contra-prob-start", type=float, default=0.0)
     p.add_argument("--forced-contra-prob-end", type=float, default=0.0)
     p.add_argument(
@@ -69,6 +74,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--play-eval-pairs", type=int, default=150)
     p.add_argument("--no-pimc-eval", action="store_true")
     p.add_argument("--support-deals", type=int, default=200)
+    p.add_argument("--mistake-deals", type=int, default=200)
     p.add_argument(
         "--workers", type=int, default=0, help="rollout worker processes (0 = main process)"
     )
@@ -96,6 +102,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         forced_bid_prob_end=args.forced_bid_prob_end,
         forced_bid_anneal_frac=args.forced_bid_anneal_frac,
         reward_scale=args.reward_scale,
+        trick_credit=args.trick_credit,
         forced_contra_prob_start=args.forced_contra_prob_start,
         forced_contra_prob_end=args.forced_contra_prob_end,
         bid_agent=args.bid_agent,
@@ -107,6 +114,7 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         play_eval_pairs=args.play_eval_pairs,
         pimc_eval=not args.no_pimc_eval,
         support_deals=args.support_deals,
+        mistake_deals=args.mistake_deals,
         n_workers=args.workers,
         opponent_prob=args.opponent_prob,
         snapshot_every=args.snapshot_every,

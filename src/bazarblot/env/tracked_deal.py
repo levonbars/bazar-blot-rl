@@ -30,10 +30,11 @@ class AuctionEvent:
 class TrackedDeal:
     deal: Deal
     auction_log: list[AuctionEvent] = field(default_factory=list)
-    melds_cache: tuple[tuple[Meld, ...], ...] | None = field(
+    melds_cache: tuple[tuple[Meld, ...], int | None] | None = field(
         default=None, repr=False, compare=False
     )
-    """Memoizes `env/infoset.py::info_set()`'s per-seat meld detection — `detect_all_melds` is
+    """`core/announcements.py::deal_melds(deal)`: every dealt meld and the comparison's winning
+    team, memoized for `env/infoset.py::info_set()` — `detect_all_melds` is
     a pure function of `deal.original_hands` and `deal.contract.contract_type`, both fixed for
     the entire PLAY phase once the auction closes, so recomputing it on every single decision (as
     `info_set()` used to) was pure waste — a profiling pass (M6) found it was the single largest

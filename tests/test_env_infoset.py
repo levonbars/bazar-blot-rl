@@ -24,7 +24,7 @@ compares only the fields that must NEVER depend on hidden information regardless
 status (`hand`, `card_state`, `current_trick`, `voids`, `suit_unseen`, `cards_left`), and leaves
 meld-derived fields out of the comparison — not because they're exempt from correctness, but
 because their correctness is a different property (already covered by `declarations.py`'s own
-extensive M1 test suite, plus the explicit assertion here that `melds_by_seat is None` before a
+extensive M1 test suite, plus the explicit assertion here that nothing is announced before a
 contract exists) than "does this field leak an unplayed card from another hand."
 """
 
@@ -238,7 +238,7 @@ def test_no_leakage_through_play_phase() -> None:
 
         info_a = info_set(tracked_a, seat, match_score=(0, 0), deal_number=0)
         info_b = info_set(tracked_b, seat, match_score=(0, 0), deal_number=0)
-        assert info_a.melds_by_seat is not None and info_b.melds_by_seat is not None
+        assert info_a.own_melds is not None and info_b.own_melds is not None
 
         blocks_a, blocks_b = encode(info_a), encode(info_b)
         for key in _NON_MELD_KEYS:
@@ -248,7 +248,7 @@ def test_no_leakage_through_play_phase() -> None:
 
 
 def test_melds_hidden_during_auction() -> None:
-    """`melds_by_seat` must be `None` (nothing disclosed yet) until a contract exists — the
+    """`own_melds` must be `None` and `announcements` empty until a contract exists — the
     guard that makes the auction-phase leakage test's scope ("no legitimate disclosure channel
     at all") actually true."""
     rng = random.Random(0)
@@ -260,7 +260,8 @@ def test_melds_hidden_during_auction() -> None:
     tracked = TrackedDeal(deal)
     for seat in range(4):
         info = info_set(tracked, seat, match_score=(0, 0), deal_number=0)
-        assert info.melds_by_seat is None
+        assert info.own_melds is None
+        assert info.announcements == ()
 
 
 def test_hand_field_never_contains_another_seats_card() -> None:

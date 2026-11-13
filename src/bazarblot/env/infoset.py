@@ -16,10 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bazarblot.core.announcements import Announcement, announcements, deal_melds
 from bazarblot.core.auction import AuctionState, Contract
 from bazarblot.core.cards import TEAM_OF, ContractTables
 from bazarblot.core.deal import DealResult, Phase
-from bazarblot.core.declarations import Meld, detect_all_melds
+from bazarblot.core.declarations import Meld
 from bazarblot.core.play import current_winner
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.tracked_deal import AuctionEvent, TrackedDeal
@@ -30,13 +31,12 @@ class InfoSet:
     """Everything seat `seat` may legally condition a decision on. Every field here is either
     that seat's own private information (`hand`) or public information every seat can see.
 
-    `melds_by_seat`, when set, is full disclosure of every meld every seat holds — correct ONLY
-    under the current `staging.declarations_are_actions = False` default, where "auto-announced
-    and auto-shown" means every combination is genuinely visible to everyone from the start of
-    play (rules §6.5's staged bluffing sub-game is switched off entirely, not just hidden from
-    the observation). `info_set()` raises if that flag is ever turned on, rather than silently
-    keeping this field's current (wrong, over-disclosing) semantics — `core/` has no staged
-    announce/question/show state machine yet for it to read instead. See `info_set()`.
+    Combinations follow the public timeline of `core/announcements.py`: `own_melds` is this
+    seat's own combinations (its own hand, once a contract exists), and `announcements` is every
+    call made so far — classes at hand 1, the winning team's shown cards at hand 2, blot/reblot
+    as the trump K and Q are played. Nobody else's melds are visible beyond what has been called.
+    (Before OBS v4 every seat's best meld was disclosed from the first card of play.) Valid only
+    under `staging.declarations_are_actions = False`; `info_set()` raises otherwise.
     """
 
     seat: int
@@ -56,7 +56,8 @@ class InfoSet:
     tricks: tuple[tuple[tuple[int, int], ...], ...]  # completed tricks, each a play sequence
     current_trick: tuple[tuple[int, int], ...]
     trick_leader: int | None
-    melds_by_seat: tuple[tuple[Meld, ...], ...] | None
+    own_melds: tuple[Meld, ...] | None
+    announcements: tuple[Announcement, ...]
     result: DealResult | None
 
     @property
@@ -96,7 +97,8 @@ def info_set(
     deal = tracked.deal
     rules = deal.rules
 
-    melds_by_seat: tuple[tuple[Meld, ...], ...] | None = None
+    own_melds: tuple[Meld, ...] | None = None
+    calls: tuple[Announcement, ...] = ()
     if deal.contract is not None:
         if rules.staging.declarations_are_actions:
             raise NotImplementedError(
@@ -104,18 +106,13 @@ def info_set(
                 "announce/auto-show default). core/ has no staged announce/question/show state "
                 "machine for info_set() to read from instead — see declarations.py's docstring."
             )
-        # Auto-show means genuinely full disclosure from the start of play, not just at scoring
-        # (Deal itself only computes this lazily at _finish_play, for scoring purposes) — so
-        # info_set exposes it for every play-phase InfoSet, seat 0's view identical to seat 3's.
-        # Cached on `tracked` (see `TrackedDeal.melds_cache`'s docstring): both inputs
-        # (`original_hands`, `contract.contract_type`) are fixed for the whole PLAY phase, so
-        # this only needs computing once per deal, not once per decision.
+        # Every dealt meld and the comparison winner are fixed for the whole play phase: cached
+        # on `tracked` (see `TrackedDeal.melds_cache`) rather than recomputed per decision.
         if tracked.melds_cache is None:
-            all_melds = detect_all_melds(deal.original_hands, deal.contract.contract_type, rules)
-            tracked.melds_cache = tuple(
-                tuple(m for m in all_melds if m.owner_seat == s) for s in range(4)
-            )
-        melds_by_seat = tracked.melds_cache
+            tracked.melds_cache = deal_melds(deal)
+        all_melds = tracked.melds_cache[0]
+        own_melds = tuple(m for m in all_melds if m.owner_seat == seat)
+        calls = tuple(announcements(deal, tracked.melds_cache))
 
     return InfoSet(
         seat=seat,
@@ -134,6 +131,7 @@ def info_set(
         tricks=tuple(t.plays for t in deal.tricks),
         current_trick=tuple(deal.current_trick),
         trick_leader=deal.trick_leader,
-        melds_by_seat=melds_by_seat,
+        own_melds=own_melds,
+        announcements=calls,
         result=deal.result,
     )

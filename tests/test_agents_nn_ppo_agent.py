@@ -62,12 +62,12 @@ def test_forced_bid_prob_overrides_meta_choice_toward_bid() -> None:
             if any_bid_legal:
                 assert SPACE.bid_start <= decision.action_idx < SPACE.play_start
                 n_bid_decisions += 1
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
         while deal.phase == Phase.PLAY:
             info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=deal_id)
             mask = legal_mask(info, SPACE)
             decision = decide(net, info, SPACE, mask, sample=True, forced_bid_prob=1.0)
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
     assert n_bid_decisions > 0
 
 
@@ -101,12 +101,12 @@ def test_forced_bid_log_prob_still_matches_recompute() -> None:
             assert log_prob.item() == pytest.approx(decision.log_prob, abs=1e-5)
             assert value.item() == pytest.approx(decision.value, abs=1e-5)
             checked += 1
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
         while deal.phase == Phase.PLAY:
             info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=deal_id)
             mask = legal_mask(info, SPACE)
             decision = decide(net, info, SPACE, mask, sample=True)
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
     assert checked > 0
 
 
@@ -139,7 +139,7 @@ def test_recompute_log_prob_matches_decide_when_network_unchanged() -> None:
                 checked_auction += 1
             else:
                 checked_play += 1
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
     assert checked_auction > 0
     assert checked_play > 0
 
@@ -177,10 +177,10 @@ def test_forced_contra_prob_doubles_whenever_doubling_is_legal_and_scores_it_cor
             else:
                 assert not decision.forced
                 natural_seen += 1
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
         while deal.phase == Phase.PLAY:
             info = info_set(tracked, deal.to_act, match_score=(0, 0), deal_number=deal_id)
             decision = decide(net, info, SPACE, legal_mask(info, SPACE), sample=True)
             assert not decision.forced
-            tracked.step(SPACE.decode(decision.action_idx))
+            tracked.step(SPACE.decode(decision.env_action_idx))
     assert forced_seen > 0 and natural_seen > 0

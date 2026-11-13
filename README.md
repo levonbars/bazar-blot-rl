@@ -87,7 +87,7 @@ Three modes: **watch** four bots play each other with full state visible, **play
 yourself against three bots (only your seat's information is ever sent to the browser), or
 **replay** a logged deal (paste the JSON from "Copy replay log" after a deal finishes) and step
 through it. The **Bots** menu picks who fills the other seats (partner included): a trained
-checkpoint (any `checkpoints/*/final.pt` the current code can load, `m7_long_s1` first; set
+checkpoint (any `checkpoints/*/final.pt` the current code can load, newest first; set
 `BAZARBLOT_CHECKPOINTS` to another glob to change the list), the heuristic, or the simple bot.
 Trained bots play greedily and see a 0-0 score, as in training. See [`docs/03-implementation-roadmap.md`](docs/03-implementation-roadmap.md) M1.5 for
 the design (why `play` and `watch` are two genuinely separate code paths, not one function with a
@@ -330,6 +330,13 @@ about 1 point behind PIMC endgame search. Partner's bids measurably inform the b
 partner's hand and change the first card played 5-7% of the time. Still missing: partnership
 bidding conventions (answering partner's bid with aces before bidding one's own suit), and doubling
 survived in only one seed of three.
+
+**Observation v4 (after playing the agents in the UI).** Playing them showed many obvious mistakes
+(failing a quarter of contracts, throwing Aces and Tens to the opponents). With a standard suit
+order, explicit trick facts (who is winning, which cards would win) and combinations revealed only
+as announced, card play now beats the heuristic's by about +3.5 per deal and needless Ace/Ten
+throws fell from 5-8% to under 2%; overall about +10 over the heuristic. Bidding barely improved:
+contracts still fail 19-29% of the time (heuristic 7%), and partnership bidding is still absent.
 
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this

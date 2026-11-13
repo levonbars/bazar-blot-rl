@@ -472,10 +472,9 @@ at their proper moments, and that timing decides what the table knows. Each seat
 comparable combination announces its class (Tierce / Fifty / Hundred / 4x) with its trick-1 card;
 the seats of the team that wins the comparison show their combinations' cards with their trick-2
 card (the losing team shows nothing); the holder of the trump K+Q says Blot with the first of the
-two and Reblot with the second. Scoring is unchanged. The UI follows this timeline. **The agents'
-observation does not yet**: `env/infoset.py` still gives every seat each seat's best class, top card,
-trump bit and blot-reblot holding from the first card of play, which is more than the table knows.
-Switching it to this timeline changes the observation (a new `OBS_VERSION`) and needs retraining.
+two and Reblot with the second. Scoring is unchanged. The UI follows this timeline, and so does the agents'
+observation from `OBS_VERSION` v4 (`env/infoset.py`); until v3 it gave every seat each seat's best
+class, top card, trump bit and blot-reblot holding from the first card of play.
 
 A four-of-a-kind worth 0 (7s and 8s; 9s under `NT`) is **not a combination**: it is not announced
 and does not enter the comparison. (Until 2026-11-12 the engine detected it, and it won the

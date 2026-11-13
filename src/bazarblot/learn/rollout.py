@@ -40,6 +40,7 @@ from bazarblot.core.deal import Deal, DealResult, Phase
 from bazarblot.core.dealing import deal_hands, deal_seed
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import ActionSpace, legal_mask
+from bazarblot.env.canonical import canonical_belief_target
 from bazarblot.env.infoset import info_set
 from bazarblot.env.tracked_deal import TrackedDeal
 from bazarblot.learn.belief import belief_target, privileged_features
@@ -61,6 +62,10 @@ class Transition:
     """Baseline used for the advantage: the actor's own value head by default, or the centralized
     critic's estimate when one is supplied to `collect_rollout`."""
     reward: float = 0.0
+    trick_points: float = 0.0
+    """Card points of the trick this card was played to, + if this seat's team won it, - if the
+    opponents did (last-trick bonus included). Used only with `trick_credit` (see
+    `play_rollout_deals`)."""
     advantage: float = 0.0
     ret: float = 0.0
 
@@ -211,16 +216,28 @@ def _play_one(
             transitions[seat].append(
                 Transition(
                     decision=decision,
-                    belief_target=belief_target(deal.hands, seat),
+                    belief_target=canonical_belief_target(
+                        belief_target(deal.hands, seat), decision.perm
+                    ),
                     value=decision.value,
                 )
             )
-            action_idx = decision.action_idx
+            action_idx = decision.env_action_idx
         elif isinstance(actor, PolicyValueNet):
-            action_idx = decide(actor, info, space, mask, sample=True).action_idx
+            action_idx = decide(actor, info, space, mask, sample=True).env_action_idx
         else:
             action_idx = actor.act(info, space, mask)
+        n_tricks = len(deal.tricks)
         tracked.step(space.decode(action_idx))
+        if len(deal.tricks) > n_tricks:  # a trick just completed: note it on each learner's card
+            trick = deal.tricks[-1]
+            points = trick.points
+            if len(deal.tricks) == rules.deal.cards_per_player:
+                points += rules.contracts.last_hand_bonus
+            for s, seat_transitions in transitions.items():
+                if seat_transitions and seat_transitions[-1].decision.phase == Phase.PLAY:
+                    same_team = TEAM_OF[s] == TEAM_OF[trick.winner]
+                    seat_transitions[-1].trick_points += points if same_team else -points
 
     if deal.phase == Phase.ABORTED:
         return transitions, 0.0, True, None, False
@@ -253,6 +270,7 @@ def collect_rollout(
     critic: CentralCritic | None = None,
     forced_contra_prob: float = 0.0,
     reward_scale: float = SQUASH_SCALE,
+    trick_credit: bool = False,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
 
@@ -308,6 +326,7 @@ def collect_rollout(
         bid_agent=bid_agent,
         forced_contra_prob=forced_contra_prob,
         reward_scale=reward_scale,
+        trick_credit=trick_credit,
     )
     return finalize_rollout(trajectories, critic, gamma, lam), stats
 
@@ -325,6 +344,7 @@ def play_rollout_deals(
     bid_agent: Agent | None = None,
     forced_contra_prob: float = 0.0,
     reward_scale: float = SQUASH_SCALE,
+    trick_credit: bool = False,
 ) -> tuple[list[list[Transition]], RolloutStats]:
     """The deal-playing half of `collect_rollout`: plays shuffle `i` (deal seed `seed + i`,
     dealer `i % 4`) for every `i` in `deal_indices` and returns each learner seat's trajectory
@@ -382,7 +402,20 @@ def play_rollout_deals(
                 if not seat_transitions:
                     continue
                 margin = margin_team0 if TEAM_OF[seat] == 0 else -margin_team0
-                seat_transitions[-1].reward = deal_margin_reward(margin, reward_scale)
+                final = deal_margin_reward(margin, reward_scale)
+                if trick_credit:
+                    # Each card is credited with its trick's points as they happen, in the
+                    # reward's units (10 card points = 1 score point, divided by the squash scale,
+                    # the slope of tanh at 0); the last reward is reduced by the same total, so the
+                    # seat's return is unchanged and so is the best policy.
+                    k = 1.0 / (10.0 * reward_scale)
+                    for t in seat_transitions:
+                        t.reward = k * t.trick_points
+                    seat_transitions[-1].reward += final - sum(
+                        k * t.trick_points for t in seat_transitions
+                    )
+                else:
+                    seat_transitions[-1].reward = final
                 label = outcome_label(seat, result)
                 for t in seat_transitions:
                     t.outcome_target = label

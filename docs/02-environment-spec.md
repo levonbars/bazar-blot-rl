@@ -279,6 +279,16 @@ Apply as a random permutation at sample time in training, and average over permu
 inference for a cheap ensemble. This is one of the highest value-per-line changes in the whole
 project; do it in M3, not as an afterthought.
 
+**As implemented (`v4`, `env/canonical.py`): canonical ordering, not random permutation.** Random
+deals already show every suit equally often, so a random relabeling of them adds no information;
+what the long-baseline agents lacked was a network that treats the suits alike (each seed
+over-bid one arbitrary suit and did worst in it). The network agent therefore relabels every
+`InfoSet` into a standard order before encoding it: slot 0 = trump once a trump contract exists,
+the other suits by the deciding seat's own original holding (more cards, then higher ranks, then
+the real suit order as a tie-break). The order uses only the seat's own hand and the public
+contract. The network chooses in that frame and the agent maps the choice back to real suits;
+belief targets are relabeled the same way.
+
 ### 4.3 Feature blocks (`v1`)
 
 | Block | Shape | Description |
@@ -308,9 +318,20 @@ project; do it in M3, not as an afterthought.
 
 | `auction_history` (`v3`) | 24 × 16 = 384 | the whole auction **from its first action**, same per-action tuple as `bid_recent`, row = position in the auction, zero rows after the end; present in **every** phase. The play phase must see the opening bids: they are the ones that carry signals to the partner, and a last-8 window drops them first (it lost 21% of bids for a trained agent, see roadmap M7) |
 | `auction_meta` (`v3`) | 2 | auction length `/24` (clipped), and a flag set if the auction was longer than 24 actions |
+| `trick_state` (`v4`) | 6 | who is winning the current trick (rel one-hot, 4), its points so far `/40`, and a "leading" flag (empty trick) |
+| `card_power` (`v4`) | 32 × 5 = 160 | per card under the contract: would win the current trick if I played it now (my cards only), is trump, rank within its suit (0..1, contract order), points `/11`, is the highest unplayed card of its suit. These are facts of the rules, not advice; the network had to rediscover them separately for each trump suit |
 
 **Total (play net, dropping `bid_recent`): ≈ 480 floats.** (These two totals predate `v3` and
-the implementation's choices; the shipped `v3` vector is 1,120 floats in every phase.)
+the implementation's choices; the shipped `v3` vector was 1,120 floats and `v4` is 1,286, in
+every phase.)
+
+**`v4` combinations follow the public timeline** (`core/announcements.py`, rules §6.5): until `v3`
+`melds_public` gave every seat's best combination (class, top card, trump bit, blot-reblot) from
+the first card of play, and `contract_progress` counted every seat's dealt combinations. In `v4`
+`melds_public` holds what was announced (class, at hand 1), shown (the comparison winners' cards,
+at hand 2) and said (blot / reblot as the cards are played); its last five channels are [hand-1
+turn passed, has shown, shown value/200, blot said, reblot said]. `contract_progress` counts only
+the attackers' shown combinations and reblots.
 **Total (auction net): ≈ 610 floats**, or keep the auction history as a length-`T` token sequence
 for a small transformer instead of a flat block (recommended if you go the transformer route).
 

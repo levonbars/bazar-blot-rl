@@ -48,6 +48,9 @@ def test_measure_signaling_report_is_well_formed() -> None:
     torch.manual_seed(0)
     net = build_network(RULES)
     apply_action_prior(net, raise_decay=0.5, capot_bias=-4.0, double_bias=-3.0)
+    with torch.no_grad():  # greedy untrained auctions must end: open at the top of the ladder,
+        # where nobody can bid over it, so every deal reaches card play
+        net.delta_head.bias.copy_(torch.arange(net.delta_head.bias.numel(), dtype=torch.float32))
     report = measure_signaling(RULES, SPACE, net, n_deals=60, seed=1, n_resamples=200)
     assert report is not None
     assert report.n_decisions > 0

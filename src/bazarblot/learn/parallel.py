@@ -159,6 +159,7 @@ class _Task:
     forced_bid_prob: float
     forced_contra_prob: float
     reward_scale: float
+    trick_credit: bool = False
 
 
 def _worker(
@@ -208,6 +209,7 @@ def _worker(
             bid_agent=bid_agent,
             forced_contra_prob=task.forced_contra_prob,
             reward_scale=task.reward_scale,
+            trick_credit=task.trick_credit,
         )
         packed = pack_trajectories(trajectories) if trajectories else None
         conn.send((packed, stats, time.perf_counter() - t0))
@@ -265,6 +267,7 @@ class ParallelRollout:
         critic: CentralCritic | None = None,
         forced_contra_prob: float = 0.0,
         reward_scale: float = SQUASH_SCALE,
+        trick_credit: bool = False,
     ) -> tuple[list[Transition], RolloutStats]:
         """Same contract as `rollout.collect_rollout` (shuffle `i` uses deal seed `seed + i`),
         with `snapshots` given as `(version, net)` pairs; a version's weights are sent once."""
@@ -289,6 +292,7 @@ class ParallelRollout:
                     forced_bid_prob=forced_bid_prob,
                     forced_contra_prob=forced_contra_prob,
                     reward_scale=reward_scale,
+                    trick_credit=trick_credit,
                 )
             )
         self._sent_versions.update(new)

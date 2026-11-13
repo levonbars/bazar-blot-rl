@@ -67,17 +67,28 @@ def _plays(deal: Deal) -> Iterator[tuple[int, int, int]]:
         yield len(deal.tricks), seat, card
 
 
-def announcements(deal: Deal) -> list[Announcement]:
-    """Every combination announcement made so far, in the order made. Empty before play."""
-    contract = deal.contract
-    if contract is None or not (deal.tricks or deal.current_trick):
-        return []
+def deal_melds(deal: Deal) -> tuple[tuple[Meld, ...], int | None]:
+    """Every meld dealt (all seats, under the final contract) and the team that wins the
+    comparison. Fixed for the whole play phase, so callers may cache it per deal."""
+    assert deal.contract is not None
     rules = deal.rules
-    melds = detect_all_melds(deal.original_hands, contract.contract_type, rules)
-    by_seat = [[m for m in melds if m.owner_seat == s] for s in range(4)]
+    melds = detect_all_melds(deal.original_hands, deal.contract.contract_type, rules)
     winning_team = resolve_combinations_from_melds(
         melds, rules, opener_seat(deal.dealer, rules)
     ).winning_team
+    return tuple(melds), winning_team
+
+
+def announcements(
+    deal: Deal, cached: tuple[tuple[Meld, ...], int | None] | None = None
+) -> list[Announcement]:
+    """Every combination announcement made so far, in the order made. Empty before play.
+    `cached` is `deal_melds(deal)`, when the caller keeps it."""
+    contract = deal.contract
+    if contract is None or not (deal.tricks or deal.current_trick):
+        return []
+    melds, winning_team = cached if cached is not None else deal_melds(deal)
+    by_seat = [[m for m in melds if m.owner_seat == s] for s in range(4)]
     blot_cards = {
         m.owner_seat: set(m.cards) for m in melds if m.kind == "blot_reblot"
     }  # seat -> its trump K and Q
