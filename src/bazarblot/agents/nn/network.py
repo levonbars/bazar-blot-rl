@@ -37,6 +37,14 @@ from bazarblot.env.obs import BLOCK_SHAPES
 
 OBS_DIM = sum(math.prod(shape) for shape in BLOCK_SHAPES.values())
 
+# Training-only "oracle" input (after Suphx's oracle guiding, Li et al. 2020): partner's unplayed
+# hand, one float per card in the standard suit order, appended to the observation by
+# `learn/rollout.py` when `oracle_keep > 0` and faded to nothing over training (each card is shown
+# with probability `oracle_keep`). It enters through its own zero-initialized first-layer weights,
+# so a network given only the `OBS_DIM` observation (every evaluation, the UI, old checkpoints)
+# behaves exactly as if the input were all zeros.
+ORACLE_DIM = 32
+
 # Meta head order for the auction phase: which of the four top-level auction choices this is.
 META_PASS, META_CONTRA, META_RECONTRA, META_BID = range(4)
 N_META = 4
@@ -108,9 +116,19 @@ class PolicyValueNet(nn.Module):
         self.value_head = nn.Linear(trunk_out, 1)
         self.belief_head = nn.Linear(trunk_out, heads.n_cards * N_BELIEF_SEATS)
         self.outcome_head = nn.Linear(trunk_out, N_OUTCOMES)
+        first = self.trunk[0]
+        assert isinstance(first, nn.Linear)
+        # A plain zero parameter (not `nn.Linear`, whose initialization would draw random numbers
+        # and shift every later draw of an existing seeded run).
+        self.oracle_weight = nn.Parameter(torch.zeros(first.out_features, ORACLE_DIM))
 
     def forward(self, obs: Tensor) -> dict[str, Tensor]:
-        trunk = self.trunk(obs)
+        if obs.shape[-1] == self.heads.obs_dim + ORACLE_DIM:
+            base, oracle = obs[..., : self.heads.obs_dim], obs[..., self.heads.obs_dim :]
+            x = self.trunk[0](base) + nn.functional.linear(oracle, self.oracle_weight)
+            trunk = self.trunk[1:](x)
+        else:
+            trunk = self.trunk(obs)
         return {
             "meta": self.meta_head(trunk),
             "delta": self.delta_head(trunk),
@@ -169,10 +187,12 @@ class CentralCritic(nn.Module):
     def __init__(self, obs_dim: int = OBS_DIM, hidden: tuple[int, ...] = (256, 256)) -> None:
         super().__init__()
         self.hidden = hidden
+        self.obs_dim = obs_dim
         self.trunk = _trunk(obs_dim + PRIVILEGED_DIM, hidden)
         self.head = nn.Linear(hidden[-1], 1)
 
     def forward(self, obs: Tensor, privileged: Tensor) -> Tensor:
+        obs = obs[..., : self.obs_dim]  # drop the actor's oracle input, if any: the critic sees all
         value: Tensor = self.head(self.trunk(torch.cat([obs, privileged], dim=-1))).squeeze(-1)
         return value
 

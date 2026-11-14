@@ -43,6 +43,22 @@ def _parse_args(argv: list[str]) -> TrainConfig:
     p.add_argument("--search-margin", type=float, default=0.02)
     p.add_argument("--search-evaluate", choices=["playout", "critic"], default="playout")
     p.add_argument(
+        "--oracle-keep",
+        type=float,
+        default=None,
+        help="show the learner partner's hand through the oracle input, each card with this "
+        "probability (training only); faded to 0 over --oracle-fade",
+    )
+    p.add_argument("--oracle-fade", default="0,0", help="START,END iterations of the fade")
+    p.add_argument(
+        "--info-bonus",
+        type=float,
+        default=0.0,
+        help="reward per nat/card an auction action raises partner's belief about the actor's "
+        "hand; faded to 0 over --info-bonus-fade",
+    )
+    p.add_argument("--info-bonus-fade", default="0,0", help="START,END iterations of the fade")
+    p.add_argument(
         "--trick-credit",
         action="store_true",
         help="credit card points as each trick completes (same total reward)",
@@ -123,6 +139,10 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         search_deltas=tuple(int(x) for x in args.search_deltas.split(",") if x),
         search_margin=args.search_margin,
         search_evaluate=args.search_evaluate,
+        oracle_keep=args.oracle_keep,
+        oracle_fade=_pair(args.oracle_fade),
+        info_bonus=args.info_bonus,
+        info_bonus_fade=_pair(args.info_bonus_fade),
         forced_contra_prob_start=args.forced_contra_prob_start,
         forced_contra_prob_end=args.forced_contra_prob_end,
         bid_agent=args.bid_agent,
@@ -143,6 +163,11 @@ def _parse_args(argv: list[str]) -> TrainConfig:
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
     )
+
+
+def _pair(text: str) -> tuple[int, int]:
+    a, b = (int(x) for x in text.split(","))
+    return a, b
 
 
 def main(argv: list[str]) -> None:

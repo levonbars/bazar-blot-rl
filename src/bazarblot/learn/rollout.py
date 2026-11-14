@@ -40,8 +40,13 @@ from bazarblot.core.deal import Deal, DealResult, Phase
 from bazarblot.core.dealing import deal_hands, deal_seed
 from bazarblot.core.rules import RuleConfig
 from bazarblot.env.actions import ActionSpace, legal_mask
-from bazarblot.env.canonical import canonical_belief_target
+from bazarblot.env.canonical import (
+    canonical_belief_target,
+    canonical_permutation,
+    permute_infoset,
+)
 from bazarblot.env.infoset import info_set
+from bazarblot.env.obs import encode, flatten
 from bazarblot.env.tracked_deal import TrackedDeal
 from bazarblot.learn.belief import belief_target, privileged_features
 from bazarblot.learn.joint_search import JointSearch, JointSearchConfig
@@ -67,6 +72,9 @@ class Transition:
     """Card points of the trick this card was played to, + if this seat's team won it, - if the
     opponents did (last-trick bonus included). Used only with `trick_credit` (see
     `play_rollout_deals`)."""
+    bonus: float = 0.0
+    """Information bonus for an auction action (`info_bonus`, see `_information_gains`), added to
+    `reward` once the deal's rewards are set."""
     advantage: float = 0.0
     ret: float = 0.0
 
@@ -135,6 +143,10 @@ class RolloutStats:
     n_search_deviations: int = 0
     n_search_replies: int = 0
     n_search_reply_changes: int = 0
+    info_gain_sum: float = 0.0
+    """Sum and count of the information gains measured for the information bonus (nats per card
+    of the acting seat's hand, from partner's belief head; see `_information_gains`)."""
+    info_gain_n: int = 0
 
     @property
     def learner_declare_rate(self) -> float | None:
@@ -153,6 +165,54 @@ class RolloutStats:
         return self.n_learner_declared_contested / self.n_contested_completed
 
 
+@dataclass(frozen=True, slots=True)
+class _PartnerView:
+    obs: npt.NDArray[np.float32]
+    """Partner's observation (standard suit order), exactly as the network would see it."""
+    target: npt.NDArray[np.int8]
+    """Who really holds each card partner cannot see (`learn/belief.py`), in partner's suit
+    order."""
+
+
+def _partner_view(tracked: TrackedDeal, seat: int) -> _PartnerView:
+    partner = (seat + 2) % 4
+    info = info_set(tracked, partner, match_score=(0, 0), deal_number=0)
+    perm = canonical_permutation(info)
+    obs = flatten(encode(permute_infoset(info, perm))).astype(np.float32)
+    target = canonical_belief_target(belief_target(tracked.deal.hands, partner), perm)
+    return _PartnerView(obs=obs, target=target)
+
+
+def _information_gains(
+    net: PolicyValueNet, probes: list[tuple[int, int, _PartnerView, _PartnerView]]
+) -> list[float]:
+    """For each auction action: how much it improved partner's picture of the hidden cards -- the
+    mean, over the cards partner cannot see, of `log p(true holder)` from partner's belief head
+    right after the action minus right before it, in nats per card. Only the actor acted in
+    between, so the change is what the action told partner (about the actor's hand, and through
+    it about the opponents'). This is a proper score: for a calibrated belief head its expected
+    value is the information the action carries, never negative.
+
+    This is the information bonus of Policy-Belief Learning (Tian et al. 2020): a reward for
+    telling partner something TRUE about one's hand, measured by the same network's belief head
+    (trained on ground truth, so it can only be raised by actions that really correlate with the
+    hand). It says nothing about WHAT a bid should mean; any code that informs partner earns it.
+    Partner's view uses the plain observation, never the oracle input."""
+    views = [v for _, _, before, after in probes for v in (before, after)]
+    with torch.no_grad():
+        out = net(torch.from_numpy(np.stack([v.obs for v in views])))
+    log_p = torch.log_softmax(out["belief"], dim=-1).numpy()
+    gains = []
+    for k in range(len(probes)):
+        scores = []
+        for row in (2 * k, 2 * k + 1):
+            target = views[row].target
+            cards = np.nonzero(target >= 0)[0]
+            scores.append(float(log_p[row, cards, target[cards]].mean()) if len(cards) else 0.0)
+        gains.append(scores[1] - scores[0])
+    return gains
+
+
 def _play_one(
     rules: RuleConfig,
     space: ActionSpace,
@@ -165,6 +225,9 @@ def _play_one(
     forced_contra_prob: float = 0.0,
     joint_search: JointSearch | None = None,
     search_rng: random.Random | None = None,
+    oracle_keep: float | None = None,
+    info_bonus: float = 0.0,
+    aux_rng: random.Random | None = None,
 ) -> tuple[dict[int, list[Transition]], float, bool, DealResult | None, bool]:
     """Play one deal; `seat_actors[seat]` decides seat `seat`'s actions -- either `learner`
     itself, a frozen `PolicyValueNet` snapshot from the opponent pool, or an arbitrary `Agent`
@@ -208,6 +271,10 @@ def _play_one(
     # Joint bid search runs only in pure self-play deals (all four seats the learner).
     searching = joint_search is not None and len(transitions) == 4 and search_rng is not None
     reply_due: set[int] = set()  # partners owed a best reply to a searched deviation
+    oracle_rng = aux_rng if aux_rng is not None else random.Random(seed)
+    # (seat, transition index, partner's view before, partner's view after) per learner auction
+    # action, for the information bonus
+    gain_probes: list[tuple[int, int, _PartnerView, _PartnerView]] = []
 
     while deal.phase in (Phase.AUCTION, Phase.PLAY):
         if (
@@ -232,6 +299,11 @@ def _play_one(
                     force = joint_search.search(tracked)
                     if force is not None:
                         reply_due.add((seat + 2) % 4)
+            oracle_cards: frozenset[int] | None = None
+            if oracle_keep is not None:
+                oracle_cards = frozenset(
+                    c for c in deal.hands[(seat + 2) % 4] if oracle_rng.random() < oracle_keep
+                )
             decision = decide(
                 learner,
                 info,
@@ -241,6 +313,7 @@ def _play_one(
                 forced_bid_prob=forced_bid_prob,
                 forced_contra_prob=forced_contra_prob,
                 force_env_action=force,
+                oracle_cards=oracle_cards,
             )
             transitions[seat].append(
                 Transition(
@@ -252,6 +325,13 @@ def _play_one(
                 )
             )
             action_idx = decision.env_action_idx
+            if info_bonus > 0.0 and info.phase == Phase.AUCTION:
+                before = _partner_view(tracked, seat)
+                tracked.step(space.decode(action_idx))
+                if deal.phase in (Phase.AUCTION, Phase.PLAY):
+                    after = _partner_view(tracked, seat)
+                    gain_probes.append((seat, len(transitions[seat]) - 1, before, after))
+                continue
         elif isinstance(actor, PolicyValueNet):
             action_idx = decide(actor, info, space, mask, sample=True).env_action_idx
         else:
@@ -268,6 +348,10 @@ def _play_one(
                     same_team = TEAM_OF[s] == TEAM_OF[trick.winner]
                     seat_transitions[-1].trick_points += points if same_team else -points
 
+    if gain_probes:
+        gains = _information_gains(learner, gain_probes)
+        for (s, i, _, _), g in zip(gain_probes, gains, strict=True):
+            transitions[s][i].bonus = info_bonus * g
     if deal.phase == Phase.ABORTED:
         return transitions, 0.0, True, None, False
     assert deal.result is not None
@@ -302,6 +386,8 @@ def collect_rollout(
     trick_credit: bool = False,
     lam_auction: float | None = None,
     search_config: JointSearchConfig | None = None,
+    oracle_keep: float | None = None,
+    info_bonus: float = 0.0,
 ) -> tuple[list[Transition], RolloutStats]:
     """Collect `n_deals` shuffles' worth of self-play data for `learner`.
 
@@ -360,6 +446,8 @@ def collect_rollout(
         trick_credit=trick_credit,
         search_config=search_config,
         critic=critic,
+        oracle_keep=oracle_keep,
+        info_bonus=info_bonus,
     )
     return finalize_rollout(trajectories, critic, gamma, lam, lam_auction), stats
 
@@ -380,6 +468,8 @@ def play_rollout_deals(
     trick_credit: bool = False,
     search_config: JointSearchConfig | None = None,
     critic: CentralCritic | None = None,
+    oracle_keep: float | None = None,
+    info_bonus: float = 0.0,
 ) -> tuple[list[list[Transition]], RolloutStats]:
     """The deal-playing half of `collect_rollout`: plays shuffle `i` (deal seed `seed + i`,
     dealer `i % 4`) for every `i` in `deal_indices` and returns each learner seat's trajectory
@@ -394,6 +484,7 @@ def play_rollout_deals(
         else None
     )
     search_rng = random.Random(rng.random())
+    aux_rng = random.Random(search_rng.random()) if oracle_keep is not None else None
 
     for i in deal_indices:
         dealer = i % 4
@@ -425,6 +516,9 @@ def play_rollout_deals(
                 forced_contra_prob,
                 joint_search,
                 search_rng,
+                oracle_keep,
+                info_bonus,
+                aux_rng,
             )
             stats.n_deals += 1
             stats.n_capped += int(capped)
@@ -459,6 +553,12 @@ def play_rollout_deals(
                     )
                 else:
                     seat_transitions[-1].reward = final
+                if info_bonus > 0.0:
+                    for t in seat_transitions:
+                        if t.decision.phase == Phase.AUCTION:
+                            t.reward += t.bonus
+                            stats.info_gain_sum += t.bonus / info_bonus
+                            stats.info_gain_n += 1
                 label = outcome_label(seat, result)
                 for t in seat_transitions:
                     t.outcome_target = label
@@ -509,4 +609,6 @@ def merge_stats(parts: Sequence[RolloutStats]) -> RolloutStats:
         out.n_search_deviations += p.n_search_deviations
         out.n_search_replies += p.n_search_replies
         out.n_search_reply_changes += p.n_search_reply_changes
+        out.info_gain_sum += p.info_gain_sum
+        out.info_gain_n += p.info_gain_n
     return out

@@ -164,6 +164,8 @@ class _Task:
     search_config: JointSearchConfig | None = None
     critic_state: dict[str, torch.Tensor] | None = None
     critic_hidden: tuple[int, ...] = (256, 256)
+    oracle_keep: float | None = None
+    info_bonus: float = 0.0
 
 
 def _worker(
@@ -221,6 +223,8 @@ def _worker(
             trick_credit=task.trick_credit,
             search_config=task.search_config,
             critic=critic,
+            oracle_keep=task.oracle_keep,
+            info_bonus=task.info_bonus,
         )
         packed = pack_trajectories(trajectories) if trajectories else None
         conn.send((packed, stats, time.perf_counter() - t0))
@@ -281,6 +285,8 @@ class ParallelRollout:
         trick_credit: bool = False,
         lam_auction: float | None = None,
         search_config: JointSearchConfig | None = None,
+        oracle_keep: float | None = None,
+        info_bonus: float = 0.0,
     ) -> tuple[list[Transition], RolloutStats]:
         """Same contract as `rollout.collect_rollout` (shuffle `i` uses deal seed `seed + i`),
         with `snapshots` given as `(version, net)` pairs; a version's weights are sent once."""
@@ -316,6 +322,8 @@ class ParallelRollout:
                     search_config=search_config,
                     critic_state=critic_state,
                     critic_hidden=tuple(critic.hidden) if critic is not None else (256, 256),
+                    oracle_keep=oracle_keep,
+                    info_bonus=info_bonus,
                 )
             )
         self._sent_versions.update(new)

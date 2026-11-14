@@ -1519,6 +1519,57 @@ constant entropy 0.005):
   (Pragmatic/Policy-Belief Learning, Tian et al. 2020): a bid earns a bonus for how much it
   improves partner's belief about the bidder's hand, decayed to zero over training.
 
+**Why a raise does not pay, measured (2026-11-12, run A, 600 constructed 8H deals each).** Scoring:
+a made contract pays bid + points taken, a failed one hands the defenders bid + 16, so one more
+level gains 1 point if still made and loses about 35-40 if it tips the contract into failure.
+(a) Partner already reads the opening: with the fit it passes 89%, without hearts it moves 90%,
+and moving gains +3.6 over passing; "other suit over partner" is therefore not a clean mistake
+count. (b) Uncontested, the pair takes 146 points in hearts on average and makes 95% at mean level
+9.6; a forced raise ends at level 11.7 and fails 24%. (c) Contested, the opponents win 55% of
+these auctions (level 11.2, made 83%, our margin -15.5); bidding hearts one higher and letting
+everyone continue gains +2.7 +/- 3.1. So under the current play no single change of bid pays.
+
+**Information bonus and oracle guiding (2026-11-13): partner raises for the first time.** Both
+fine-tuned from the lambda-0 control (`m7_jps_control`), same settings, seed 2. The project owner
+approved rewarding informative bids (this lifts the earlier "no reward shaping for the bidder"
+rule for a bonus that fades to zero).
+
+1. `--info-bonus 0.5 --info-bonus-fade 150,400` (`m7_bonus`, 500 iterations): each auction action
+   earns 0.5 x the rise in partner's belief-head log-likelihood of the true holder of every card
+   partner cannot see (nats per card, `learn/rollout.py::_information_gains`), after Policy-Belief
+   Learning (Tian et al. 2020). Nothing says what a bid should mean. On the starting checkpoint
+   the mean gain per action is about 0 (openings +0.009, passes -0.007).
+2. `--oracle-keep 1.0 --oracle-fade 150,450` (`m7_oracle`, 600 iterations): partner's unplayed
+   hand as an extra, training-only network input (`ORACLE_DIM`, zero-initialized weights, each
+   card shown with the keep probability), after Suphx's oracle guiding. Evaluation, the UI and old
+   checkpoints never receive it.
+
+Ceiling (`python -m bazarblot.cli.oracle`, 400 deal pairs, oracle checkpoint at iteration 100 vs
+the control): seeing partner's hand +2.1 (CI +0.7, +3.5); the same network blind +0.4 (-1.0,
++1.8). So full knowledge of partner's hand was worth about +1.7 points per deal at that point (a
+lower bound: 100 iterations of learning to use it).
+
+| | control (start) | info bonus (final) | oracle, faded (final) |
+|---|---|---|---|
+| 8H, fit: raise / pass | 0% / 92% | **30%** / 44% | **26%** / 59% |
+| 8H, no fit: raise | 0% | 0% | 0% |
+| 8H fit raise by evaluation (every 100 it.) | | 27, 30, 33, 24, 30% | 1, 2, 5, 3, 26, 26% |
+| partner info gain (nats/card) | 0.050 | 0.066 (0.060-0.079 in-run) | 0.057 |
+| first card changed by partner's bids | 5% | 5% | 5% |
+| head-to-head vs control (800 pairs) | | +1.0 (-0.0, +2.0) | +0.6 (-0.3, +1.6) |
+| vs heuristic (200 pairs) | +10.8 | +9.5 | +10.9 |
+| contracts failed | 30% | 34% | 38% |
+| 8H fit: partner's own choice vs passing | | -1.5 +/- 1.8 | +0.4 +/- 1.5 |
+
+- **Raises exist and are selective**: about 30% with the fit, never without. With the bonus they
+  appear by iteration 100 and stay through the 100 iterations after the bonus reached zero. In
+  the oracle run they appear only once the fade is complete (iteration 500).
+- **They do not win points yet.** Partner's own choice is level with passing in the 8H case, the
+  head-to-head is level to slightly ahead, contracts fail more often, and card play uses partner's
+  bids no more than before (first-card change rate unchanged at 5%).
+- One seed each and no matched control of the same length and seed, so the two methods cannot be
+  ranked and the size of the effect is uncertain.
+
 ---
 
 ## M8 — The two-phase experiments (the actual paper)
@@ -1594,7 +1645,7 @@ actually lands, and where the paper's novelty ceiling is.
 | Coarse raise menu adopted as the default "to shrink the action space" | it's a lossy bid abstraction and raises can't be chained; ablation only |
 | Linear reward normalization — a recontra'd high `NT` failure pays 200+ and eats the batch | squashed margin, constant fixed from the empirical median |
 | `legal_mask` computed from full state → information leak through the mask | M3 leakage test |
-| Reward shaping to "help" the bidder | banned; use auxiliary heads |
+| Reward shaping to "help" the bidder | banned, with one owner-approved exception: the information bonus (`--info-bonus`), which fades to zero; otherwise use auxiliary heads |
 | Cloning or distilling a hand-written agent to get past a learning obstacle — it imports the heuristic's habits (the clone never bid over its partner and never doubled) and defeats the goal of an agent that learns on its own | heuristics are evaluation opponents only; check the baseline and setup for bugs first (M7's "no bidding" was a heuristic bug) |
 | The play phase seeing only the tail of the auction — early bids, the ones that would carry signals, drop out first | `auction_history` from the first action (`v3`); check auction lengths against the window whenever behaviour changes |
 | Judging a bidder by its margin alone — bid-by-evaluation can win on margin and still signal nothing | report the signaling measures (M7 done-when 3) beside every bidding result |

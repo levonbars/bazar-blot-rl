@@ -55,8 +55,16 @@ def load_checkpoint(path: Path, rules: RuleConfig) -> tuple[PolicyValueNet, dict
             f"current preset is {rules.rules_hash!r}"
         )
     net = build_network(rules, hidden=tuple(payload["hidden"]))
-    net.load_state_dict(payload["state_dict"])
+    load_actor_state(net, payload["state_dict"])
     return net, payload
+
+
+def load_actor_state(net: PolicyValueNet, state: dict[str, Any]) -> None:
+    """Load actor weights; checkpoints from before the oracle input (`ORACLE_DIM`) lack only its
+    zero-initialized weights, which keep their zeros (the network then behaves exactly as saved)."""
+    missing, unexpected = net.load_state_dict(state, strict=False)
+    if unexpected or any(k != "oracle_weight" for k in missing):
+        raise RuntimeError(f"checkpoint does not match the network: {missing=} {unexpected=}")
 
 
 def _hidden_sizes(net: PolicyValueNet) -> tuple[int, ...]:

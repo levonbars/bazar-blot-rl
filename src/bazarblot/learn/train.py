@@ -67,6 +67,16 @@ class TrainConfig:
     search_deltas: tuple[int, ...] = (1, 2)
     search_margin: float = 0.02
     search_evaluate: str = "playout"
+    oracle_keep: float | None = None
+    """Show each learner decision partner's unplayed hand through the network's oracle input
+    (`agents/nn/network.py::ORACLE_DIM`), each card with this probability, faded to 0 between
+    iterations `oracle_fade` (after Suphx's oracle guiding). None = no oracle input at all."""
+    oracle_fade: tuple[int, int] = (0, 0)
+    info_bonus: float = 0.0
+    """Reward per nat-per-card that an auction action raises partner's belief about the actor's
+    hand (`learn/rollout.py::_information_gains`), faded to 0 between iterations
+    `info_bonus_fade`. 0 = off."""
+    info_bonus_fade: tuple[int, int] = (0, 0)
     trick_credit: bool = False
     """Credit each card with its trick's points as the trick completes and take the same total off
     the deal's final reward (`learn/rollout.py::play_rollout_deals`): same return, earlier
@@ -154,6 +164,16 @@ def rollout_seed_for(config: TrainConfig, iteration: int) -> int:
     iteration`, so iteration k+1 replayed 255 of iteration k's 256 shuffles and a 400-iteration
     run saw only ~655 distinct deals instead of ~102,000 (every M7 run before then)."""
     return config.seed * 1_000_000_007 + iteration * max(1, config.n_deals_per_iter)
+
+
+def _faded(value: float, iteration: int, fade: tuple[int, int]) -> float:
+    """`value` until iteration `fade[0]`, then linearly down to 0 at `fade[1]`, 0 after."""
+    start, end = fade
+    if iteration < start:
+        return value
+    if iteration >= end:
+        return 0.0
+    return value * (end - iteration) / (end - start)
 
 
 def _entropy_coef_at(iteration: int, config: TrainConfig) -> float:
@@ -415,6 +435,12 @@ def _train_loop(
     for iteration in range(config.n_iterations):
         forced_bid_prob = _forced_bid_prob_at(iteration, config)
         forced_contra_prob = _forced_contra_prob_at(iteration, config)
+        oracle_keep = (
+            None
+            if config.oracle_keep is None
+            else _faded(config.oracle_keep, iteration, config.oracle_fade)
+        )
+        info_bonus = _faded(config.info_bonus, iteration, config.info_bonus_fade)
         t0 = time.perf_counter()
         rollout_seed = rollout_seed_for(config, iteration)
         if parallel is not None:
@@ -433,6 +459,8 @@ def _train_loop(
                 trick_credit=config.trick_credit,
                 lam_auction=config.auction_lambda,
                 search_config=search_config,
+                oracle_keep=oracle_keep,
+                info_bonus=info_bonus,
             )
         else:
             transitions, stats = collect_rollout(
@@ -453,6 +481,8 @@ def _train_loop(
                 trick_credit=config.trick_credit,
                 lam_auction=config.auction_lambda,
                 search_config=search_config,
+                oracle_keep=oracle_keep,
+                info_bonus=info_bonus,
             )
         t_rollout = time.perf_counter() - t0
 
@@ -536,6 +566,13 @@ def _train_loop(
                 f"search[n={stats.n_searches} dev={stats.n_search_deviations} "
                 f"rep={stats.n_search_reply_changes}/{stats.n_search_replies}]  "
                 if search_config is not None
+                else ""
+            )
+            + (f"oracle={oracle_keep:.2f}  " if oracle_keep is not None else "")
+            + (
+                f"info[bonus={info_bonus:.2f} gain="
+                f"{stats.info_gain_sum / max(1, stats.info_gain_n):+.4f}]  "
+                if config.info_bonus > 0
                 else ""
             )
             + f"t=({t_rollout:.1f}s rollout, {t_update:.1f}s update)"

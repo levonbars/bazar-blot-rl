@@ -29,10 +29,12 @@ from bazarblot.agents.nn.network import (
     META_CONTRA,
     META_PASS,
     META_RECONTRA,
+    ORACLE_DIM,
     PolicyValueNet,
 )
 from bazarblot.core.deal import Phase
 from bazarblot.env.actions import PASS_IDX, ActionSpace
+from bazarblot.env.augment import permute_card
 from bazarblot.env.canonical import (
     canonical_permutation,
     permute_infoset,
@@ -177,6 +179,7 @@ def decide(
     forced_bid_prob: float = 0.0,
     forced_contra_prob: float = 0.0,
     force_env_action: int | None = None,
+    oracle_cards: frozenset[int] | None = None,
 ) -> Decision:
     """One full decision: encode `info`, run the network, sample (or, if `sample=False`, take the
     greedy action) under the phase-appropriate hierarchical mask, and package everything
@@ -189,13 +192,22 @@ def decide(
 
     `force_env_action` (an auction action, real suits) makes the decision take exactly that action,
     e.g. the one a search chose (`learn/joint_search.py`); it is still scored under the network's
-    own distribution and marked `forced`."""
+    own distribution and marked `forced`.
+
+    `oracle_cards` (training only, `learn/rollout.py`): partner's cards to show the network
+    through its oracle input (`network.ORACLE_DIM`), real card ids; an empty set still appends
+    the (all-zero) oracle input, `None` leaves the observation as it is."""
     # Everything the network sees and chooses is in the standard suit order; only the returned
     # `env_action_idx` uses the real suits.
     perm = canonical_permutation(info)
     info = permute_infoset(info, perm)
     mask = to_canonical_mask(mask, space, perm)
     obs_np = flatten(encode(info)).astype(np.float32)
+    if oracle_cards is not None:
+        oracle = np.zeros(ORACLE_DIM, dtype=np.float32)
+        for c in oracle_cards:
+            oracle[permute_card(c, perm)] = 1.0
+        obs_np = np.concatenate([obs_np, oracle])
     obs = torch.from_numpy(obs_np).unsqueeze(0)
     with torch.no_grad():
         out = net(obs)

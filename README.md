@@ -344,6 +344,13 @@ Search over (my bid, partner's reply) pairs (`--search-prob`) were tried; neithe
 raise, and the search taught the agent to pass instead (26% of self-play deals passed out, margin
 over the heuristic down from +10 to +5). Both stay as options, off by default.
 
+**First partnership raises.** Two training-only aids each produced them: a fading bonus for bids
+that improve partner's picture of the hidden cards (`--info-bonus`), and showing the network
+partner's hand during training and fading it out (`--oracle-keep`). With the 9 and one more heart
+opposite an 8-hearts opening, partner now raises 26-30% of the time and never without hearts
+(0% before). The raises do not win points yet: both agents are about level with the one they
+started from, and contracts fail more often.
+
 The one thing still worth gathering: ~20 real deal lines from the app (cards taken, combinations,
 bid, both final scores) as a conformance fixture — the UI's "Copy replay log" button makes this
 easy to produce now. It would settle the rounding question empirically and keep re-checking the
